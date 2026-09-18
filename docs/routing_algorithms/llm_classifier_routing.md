@@ -94,7 +94,7 @@ Switchyard does not parse provider-specific reasoning fields such as
 to `strong_target` even when the judge request returned HTTP 200. With session
 affinity, that fallback can be reused without another judge call.
 
-Capability and escalation routes use JSON Schema structured output by default.
+Every classifier mode uses JSON Schema structured output by default.
 For a provider that supports JSON Object mode but not JSON Schema, set
 `response_format_type = "json_object"` on the route. Switchyard then adds the
 verdict schema to the judge prompt and validates the returned object locally.
@@ -219,6 +219,13 @@ order and is not a completion destination.
 `capable` and `efficient` are reserved names. Use them when you want a group to
 carry the tier meaning the stage and composite routers give it; otherwise any
 name works.
+
+If the judge's provider supports JSON Object mode but not JSON Schema, add
+`response_format_type = "json_object"` to the route. `response_schema` is still
+required. Switchyard appends it to your prompt, asks for a JSON object, and
+validates the reply against it. The configured schema is the source of truth, so
+do not paste a copy into the prompt. A reply that fails the schema falls back to
+`default_target`.
 
 This separation applies to every classifier mode. Prompts containing the legacy
 `{{RESPONSE_SCHEMA}}` placeholder are rejected during configuration validation.

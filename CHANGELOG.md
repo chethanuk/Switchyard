@@ -8,6 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **JSON Object output for custom classifiers** — `mode = "custom"` routes and
+  the Python `CustomClassifierConfig` accept `response_format_type = "json_object"`.
+  Switchyard appends the configured `response_schema` to the judge prompt and
+  validates the verdict locally. JSON Schema stays the default.
 - **`timeout_ms` on `[llm_clients.<name>]`** — one deadline covers all attempts,
   retry delays, and the complete response, including stream reads. Unset leaves
   the wait unbounded; `0` is rejected. A timeout returns `504` without trying another

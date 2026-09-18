@@ -464,6 +464,8 @@ pub struct CustomClassifierConfig {
     pub recent_turn_window: Option<usize>,
     /// Maximum completion tokens available to the classifier verdict.
     pub max_output_tokens: u64,
+    /// Structured-output mode requested from the classifier judge.
+    pub response_format_type: ClassifierResponseFormat,
 }
 
 impl CustomClassifierConfig {
@@ -481,6 +483,7 @@ impl CustomClassifierConfig {
             message_hash_fallback: false,
             recent_turn_window: None,
             max_output_tokens: DEFAULT_JUDGE_MAX_OUTPUT_TOKENS,
+            response_format_type: ClassifierResponseFormat::default(),
         }
     }
 
@@ -662,8 +665,10 @@ impl LlmTaskClassifier {
             message_hash_fallback,
             recent_turn_window,
             max_output_tokens,
+            response_format_type,
         } = config;
-        let contract = ClassifierContract::from_inner_schema(&prompt, response_schema)?;
+        let contract =
+            ClassifierContract::from_inner_schema(&prompt, response_schema, response_format_type)?;
         let policy = match policy {
             CustomClassifierPolicy::TargetSelector { selector } => {
                 CustomPolicyRuntime::TargetSelector(TargetSelectorPolicy::new(selector)?)

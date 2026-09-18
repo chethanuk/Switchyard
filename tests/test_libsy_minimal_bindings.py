@@ -353,6 +353,22 @@ def test_classifier_config_rejects_unknown_response_format() -> None:
         TaskClassifierConfig(0.5, response_format_type=invalid_response_format)
 
 
+def test_custom_classifier_config_rejects_unknown_response_format() -> None:
+    invalid_response_format: Any = "yaml"
+    schema = {"type": "object"}
+
+    with pytest.raises(
+        ValueError,
+        match="response_format_type must be 'json_schema' or 'json_object'",
+    ):
+        CustomClassifierConfig(
+            "Choose a target.",
+            schema,
+            "/target",
+            response_format_type=invalid_response_format,
+        )
+
+
 async def test_random_weights_and_seed_are_reproducible() -> None:
     def algorithm():
         return algorithms.random(
