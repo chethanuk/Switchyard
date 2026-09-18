@@ -1422,7 +1422,7 @@ classifier_magic = true
                     "base_threshold = 0.5",
                     "base_threshold = 0.5\nmessage_hash_fallback = true",
                 ),
-                "message_hash_fallback requires classify_trigger = new_session",
+                "message_hash_fallback requires classify_trigger = new_session or user_turn",
             ),
             (
                 with_subagent_llm_classifier(
@@ -1580,12 +1580,33 @@ confidence_threshold = 0.5
     }
 
     #[test]
-    fn accepts_new_session_trigger_with_message_hash_fallback() -> RunnerResult<()> {
-        let configured = VALID_CONFIG.replace(
-            "base_threshold = 0.5",
-            "base_threshold = 0.25\nthreshold_step = 0.1\nclassify_trigger = \"new_session\"\nmessage_hash_fallback = true",
-        );
-        runner_from_toml(&configured)?;
+    fn accepts_message_hash_fallback_on_both_retaining_triggers() -> RunnerResult<()> {
+        for trigger in ["new_session", "user_turn"] {
+            let configured = VALID_CONFIG.replace(
+                "base_threshold = 0.5",
+                &format!(
+                    "base_threshold = 0.25\nthreshold_step = 0.1\nclassify_trigger = \"{trigger}\"\nmessage_hash_fallback = true"
+                ),
+            );
+            runner_from_toml(&configured)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_a_message_hash_fallback_stage_judge_on_both_retaining_triggers() -> RunnerResult<()>
+    {
+        // The stage router's judge reaches the same guard through its own
+        // construction path, so the TOML that builds it is pinned too.
+        for trigger in ["new_session", "user_turn"] {
+            let configured = stage_config().replace(
+                "target = \"stage_judge\"\nbase_threshold = 0.5",
+                &format!(
+                    "target = \"stage_judge\"\nbase_threshold = 0.5\nclassify_trigger = \"{trigger}\"\nmessage_hash_fallback = true"
+                ),
+            );
+            runner_from_toml(&configured)?;
+        }
         Ok(())
     }
 

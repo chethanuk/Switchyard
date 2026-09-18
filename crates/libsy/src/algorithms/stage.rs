@@ -266,6 +266,7 @@ mod tests {
     use parking_lot::Mutex;
 
     use super::*;
+    use crate::ClassifyTrigger;
     use crate::algorithms::util::stage::{DECISION_SOURCE_KEY, clear_fall_open, set_fall_open};
     use crate::algorithms::util::tier_fixtures::{JUDGE, Recorder, turn_request};
     use crate::core::state::StateValue;
@@ -384,6 +385,27 @@ mod tests {
             StageRouter::new(config),
             Err(LibsyError::AlgorithmError { .. })
         ));
+    }
+
+    #[test]
+    fn accepts_a_message_hash_fallback_judge_on_every_retaining_trigger() {
+        // The judge reaches TaskClassifierConfig::validate through its own
+        // construction path, so the trigger pairing is pinned here too.
+        for (trigger, accepted) in [
+            (ClassifyTrigger::NewSession, true),
+            (ClassifyTrigger::UserTurn, true),
+            (ClassifyTrigger::EveryRequest, false),
+        ] {
+            let mut config = config();
+            config.llm_fallback = Some(LlmFallback {
+                config: TaskClassifierConfig {
+                    classify_trigger: trigger,
+                    message_hash_fallback: true,
+                    ..Default::default()
+                },
+            });
+            assert_eq!(StageRouter::new(config).is_ok(), accepted, "{trigger:?}");
+        }
     }
 
     #[test]
