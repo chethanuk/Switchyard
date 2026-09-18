@@ -418,10 +418,16 @@ impl TaskClassifierConfig {
                 message: "max_output_tokens must be at least 1".to_string(),
             });
         }
-        if self.message_hash_fallback && self.classify_trigger != ClassifyTrigger::NewSession {
+        if self.message_hash_fallback
+            && !matches!(
+                self.classify_trigger,
+                ClassifyTrigger::NewSession | ClassifyTrigger::UserTurn
+            )
+        {
             return Err(LibsyError::AlgorithmError {
-                message: "message_hash_fallback requires classify_trigger = new_session"
-                    .to_string(),
+                message:
+                    "message_hash_fallback requires classify_trigger = new_session or user_turn"
+                        .to_string(),
             });
         }
         Ok(())
@@ -490,10 +496,16 @@ impl CustomClassifierConfig {
                 message: "max_output_tokens must be at least 1".to_string(),
             });
         }
-        if self.message_hash_fallback && self.classify_trigger != ClassifyTrigger::NewSession {
+        if self.message_hash_fallback
+            && !matches!(
+                self.classify_trigger,
+                ClassifyTrigger::NewSession | ClassifyTrigger::UserTurn
+            )
+        {
             return Err(LibsyError::AlgorithmError {
-                message: "message_hash_fallback requires classify_trigger = new_session"
-                    .to_string(),
+                message:
+                    "message_hash_fallback requires classify_trigger = new_session or user_turn"
+                        .to_string(),
             });
         }
         Ok(())
@@ -713,10 +725,16 @@ impl LlmTaskClassifier {
         inner: Arc<dyn Classifier<State>>,
         config: ClassifierRouteConfig,
     ) -> Result<Self> {
-        if config.message_hash_fallback && config.classify_trigger != ClassifyTrigger::NewSession {
+        if config.message_hash_fallback
+            && !matches!(
+                config.classify_trigger,
+                ClassifyTrigger::NewSession | ClassifyTrigger::UserTurn
+            )
+        {
             return Err(LibsyError::AlgorithmError {
-                message: "message_hash_fallback requires classify_trigger = new_session"
-                    .to_string(),
+                message:
+                    "message_hash_fallback requires classify_trigger = new_session or user_turn"
+                        .to_string(),
             });
         }
         // Affinity comes first so a retained assignment short-circuits the judge call.
@@ -1091,6 +1109,96 @@ mod tests {
         test_drive_with_models(router, request, models, recorder.serve()).await?;
 
         assert_eq!(recorder.calls(), vec!["judge", "efficient", "efficient"]);
+        Ok(())
+    }
+
+    /// A caller with no session ID is identified only by its first user message, so
+    /// `user_turn` must hold its target across the tool calls that follow and re-judge
+    /// when the user speaks again. Driven in both wire shapes: decoders carry tool
+    /// results as `Role::Tool` or, for Anthropic, as a `Role::User` message whose
+    /// content is tool results only, and only the latter exercises that exception.
+    #[tokio::test]
+    async fn user_turn_holds_its_target_across_a_tool_continuation_without_a_session_id()
+    -> Result<()> {
+        let anthropic_tool_result = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult(ToolResult {
+                tool_call_id: "call-1".to_string(),
+                content: Vec::new(),
+                is_error: None,
+            })],
+        };
+
+        for (shape, result_message) in [
+            ("openai", tool_result("call-1")),
+            ("anthropic", anthropic_tool_result),
+        ] {
+            let recorder = Arc::new(Recorder::default());
+            let router = Arc::new(LlmTaskClassifier::new(LlmClassifierConfig::Capability {
+                config: TaskClassifierConfig {
+                    classify_trigger: ClassifyTrigger::UserTurn,
+                    message_hash_fallback: true,
+                    recent_turn_window: None,
+                    ..test_config(TEST_THRESHOLD)
+                },
+            })?);
+
+            let mut continuation = classify_request();
+            continuation.llm_request.messages.push(tool_call("call-1"));
+            continuation.llm_request.messages.push(result_message);
+
+            let models = runtime_models();
+            for request in [
+                classify_request(),
+                continuation,
+                classify_follow_up_request(),
+            ] {
+                test_drive_with_models(router.clone(), request, models.clone(), recorder.serve())
+                    .await?;
+            }
+
+            assert_eq!(
+                recorder.calls(),
+                vec!["judge", "efficient", "efficient", "judge", "efficient"],
+                "{shape} tool continuation"
+            );
+        }
+        Ok(())
+    }
+
+    /// Both retaining triggers can key affinity on the message hash; `every_request`
+    /// retains nothing between requests, so it still cannot. Capability and custom mode
+    /// validate this separately, so both are checked.
+    #[test]
+    fn message_hash_fallback_is_accepted_on_every_retaining_trigger() -> Result<()> {
+        for (trigger, accepted) in [
+            (ClassifyTrigger::NewSession, true),
+            (ClassifyTrigger::UserTurn, true),
+            (ClassifyTrigger::EveryRequest, false),
+        ] {
+            let capability = LlmTaskClassifier::new(LlmClassifierConfig::Capability {
+                config: TaskClassifierConfig {
+                    classify_trigger: trigger,
+                    message_hash_fallback: true,
+                    ..test_config(TEST_THRESHOLD)
+                },
+            });
+            assert_eq!(capability.is_ok(), accepted, "capability {trigger:?}");
+
+            let custom = LlmTaskClassifier::new(LlmClassifierConfig::Custom {
+                default_target: Category::Efficient,
+                config: CustomClassifierConfig {
+                    classify_trigger: trigger,
+                    message_hash_fallback: true,
+                    ..CustomClassifierConfig::new(
+                        "Custom capability rubric.",
+                        serde_json::json!({"type": "object"}),
+                        CustomClassifierPolicy::target_selector("/category"),
+                    )
+                },
+            });
+            assert_eq!(custom.is_ok(), accepted, "custom {trigger:?}");
+        }
         Ok(())
     }
 

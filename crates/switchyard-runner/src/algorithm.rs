@@ -240,7 +240,8 @@ pub struct LlmClassifierRouteConfig {
     /// How often the judge runs: every request, once per user turn, or once per session.
     pub classify_trigger: ClassifyTrigger,
     /// Reuses the session's target by hashing the first user message when no
-    /// session ID is available. Needs `classify_trigger = "new_session"`.
+    /// session ID is available. Needs `classify_trigger = "new_session"` or
+    /// `"user_turn"`.
     pub message_hash_fallback: bool,
     /// How many trailing turns the judge sees. Unset shows it the opening task
     /// and the latest user follow-up only.
