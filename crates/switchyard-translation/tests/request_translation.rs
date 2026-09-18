@@ -3686,3 +3686,149 @@ fn responses_stored_tool_outputs_stay_tool_results() -> TestResult {
     assert_eq!(output["input"], outputs);
     Ok(())
 }
+
+// Verifies a Gemini request maps its system instruction, tool turn, tools and generation config to OpenAI Chat.
+#[test]
+fn gemini_request_translates_to_openai_chat_with_system_instruction_and_tool_calls() -> TestResult {
+    let engine = TranslationEngine::default();
+    let body = json!({
+        "systemInstruction": {"parts": [{"text": "Be terse."}]},
+        "contents": [
+            {"role": "user", "parts": [{"text": "Weather in Paris?"}]},
+            {"role": "model", "parts": [{"functionCall": {
+                "id": "fc_live_1", "name": "get_weather", "args": {"city": "Paris"}
+            }}]},
+            {"role": "user", "parts": [{"functionResponse": {
+                "id": "fc_live_1", "name": "get_weather", "response": {"temp_c": 21}
+            }}]}
+        ],
+        "tools": [{"functionDeclarations": [{
+            "name": "get_weather",
+            "description": "Current weather",
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {"city": {"type": "STRING"}},
+                "required": ["city"]
+            }
+        }]}],
+        "toolConfig": {"functionCallingConfig": {
+            "mode": "ANY", "allowedFunctionNames": ["get_weather"]
+        }},
+        "generationConfig": {"temperature": 0.2, "topP": 0.9, "maxOutputTokens": 256}
+    });
+
+    let chat = engine
+        .translate_request(
+            "gemini_generate_content",
+            WireFormat::OpenAiChat,
+            &body,
+            &normalized_policy(),
+        )?
+        .body;
+
+    assert_eq!(
+        chat["messages"][0],
+        json!({"role": "system", "content": "Be terse."})
+    );
+    assert_eq!(chat["messages"][1]["role"], "user");
+    // The id Gemini issued is kept, not replaced by a synthesized one.
+    assert_eq!(
+        chat["messages"][2]["tool_calls"],
+        json!([{
+            "id": "fc_live_1",
+            "type": "function",
+            "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}
+        }])
+    );
+    assert_eq!(
+        chat["messages"][3],
+        json!({"role": "tool", "tool_call_id": "fc_live_1", "content": "{\"temp_c\":21}"})
+    );
+    // Gemini's OpenAPI upper-case type names become JSON Schema names.
+    assert_eq!(
+        chat["tools"][0]["function"]["parameters"],
+        json!({
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"]
+        })
+    );
+    assert_eq!(
+        chat["tool_choice"],
+        json!({"type": "function", "function": {"name": "get_weather"}})
+    );
+    assert_eq!(chat["temperature"], 0.2);
+    assert_eq!(chat["top_p"], 0.9);
+    assert_eq!(chat["max_completion_tokens"], 256);
+    Ok(())
+}
+
+// Verifies parallel Gemini calls to one function stay paired with their own results both ways.
+#[test]
+fn gemini_parallel_tool_calls_with_the_same_name_resolve_to_distinct_results() -> TestResult {
+    let engine = TranslationEngine::default();
+    let call =
+        |city: &str| json!({"functionCall": {"name": "get_weather", "args": {"city": city}}});
+    let result = |city: &str, temp: i64| {
+        json!({"functionResponse": {
+            "name": "get_weather", "response": {"city": city, "temp_c": temp}
+        }})
+    };
+    let body = json!({"contents": [
+        {"role": "user", "parts": [{"text": "Paris and Rome?"}]},
+        {"role": "model", "parts": [call("Paris"), call("Rome")]},
+        {"role": "user", "parts": [result("Paris", 21), result("Rome", 25)]}
+    ]});
+
+    let chat = engine
+        .translate_request(
+            "gemini_generate_content",
+            WireFormat::OpenAiChat,
+            &body,
+            &normalized_policy(),
+        )?
+        .body;
+
+    let calls = &chat["messages"][1]["tool_calls"];
+    assert_eq!(calls[0]["function"]["arguments"], "{\"city\":\"Paris\"}");
+    assert_eq!(calls[1]["function"]["arguments"], "{\"city\":\"Rome\"}");
+    assert_ne!(calls[0]["id"], calls[1]["id"]);
+    assert_eq!(chat["messages"][2]["tool_call_id"], calls[0]["id"]);
+    assert_eq!(
+        chat["messages"][2]["content"],
+        "{\"city\":\"Paris\",\"temp_c\":21}"
+    );
+    assert_eq!(chat["messages"][3]["tool_call_id"], calls[1]["id"]);
+    assert_eq!(
+        chat["messages"][3]["content"],
+        "{\"city\":\"Rome\",\"temp_c\":25}"
+    );
+
+    // Back on the Gemini wire the synthesized ids are not sent, since Gemini never issued them.
+    let gemini = engine
+        .translate_request(
+            WireFormat::OpenAiChat,
+            "gemini_generate_content",
+            &chat,
+            &normalized_policy(),
+        )?
+        .body;
+    assert_eq!(gemini["contents"], body["contents"]);
+    Ok(())
+}
+
+// Verifies a Gemini request with a role outside user/model is rejected, not coerced.
+#[test]
+fn gemini_request_rejects_an_unknown_content_role() {
+    let engine = TranslationEngine::default();
+    let body = json!({"contents": [{"role": "system", "parts": [{"text": "Be terse."}]}]});
+
+    let error = engine
+        .decode_request("gemini_generate_content", &body, &normalized_policy())
+        .expect_err("a system role inside contents is not valid Gemini");
+
+    assert!(
+        error.to_string().contains("$.contents[0].role"),
+        "unexpected error: {error}"
+    );
+}
