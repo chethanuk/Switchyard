@@ -15,7 +15,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use switchyard_llm_client::{
     AuxiliaryOperation, Backend, ClientRouter, DEFAULT_MAX_RETRIES, HttpBackendConfig, ModelConfig,
-    TranslatingLlmClient,
+    ReasoningFormat, TranslatingLlmClient,
 };
 use switchyard_protocol::{Category, ModelId, RoutedLlmClient, WireFormat};
 
@@ -179,7 +179,7 @@ impl DeploymentConfig {
         // The LLM client keeps one backend per model id, so two targets naming the same model on
         // the same client share it. That is harmless when their request settings agree (an alias
         // for a different system prompt, say) and silently wrong when they do not: the second
-        // target's reasoning_effort or extra_body would never reach the wire.
+        // target's reasoning_effort, reasoning_format or extra_body would never reach the wire.
         let mut seen_client_model_ids: HashMap<(&str, &str), (&String, &TargetConfig)> =
             HashMap::new();
         for (target_name, target) in &self.targets {
@@ -192,11 +192,13 @@ impl DeploymentConfig {
                 std::collections::hash_map::Entry::Occupied(slot) => {
                     let (first_name, first) = slot.get();
                     if first.reasoning_effort != target.reasoning_effort
+                        || first.reasoning_format.unwrap_or_default()
+                            != target.reasoning_format.unwrap_or_default()
                         || first.extra_body != target.extra_body
                         || first.omit_body_fields != target.omit_body_fields
                     {
                         return Err(RunnerError::configuration(format!(
-                            "targets {first_name} and {target_name} both name model {} on llm client {} but with different reasoning_effort, extra_body, or omit_body_fields; one target per model id is kept, so give each its own model id or llm client",
+                            "targets {first_name} and {target_name} both name model {} on llm client {} but with different reasoning_effort, reasoning_format, extra_body, or omit_body_fields; one target per model id is kept, so give each its own model id or llm client",
                             target.id, target.llm_client
                         )));
                     }
@@ -287,6 +289,7 @@ impl DeploymentConfig {
                 &BTreeMap::new(),
                 &BTreeSet::new(),
                 None,
+                ReasoningFormat::default(),
             )?;
             let (Backend::OpenAiChat(config)
             | Backend::OpenAiResponses(config)
@@ -319,6 +322,13 @@ impl DeploymentConfig {
                     )));
                 }
             }
+            if target.reasoning_format.is_some()
+                && !matches!(client_config.format, ClientFormat::OpenAiChat)
+            {
+                return Err(RunnerError::configuration(format!(
+                    "target {target_name} reasoning_format is only supported on openai_chat clients"
+                )));
+            }
             model_configs.push(ModelConfig::new(
                 target.id.clone(),
                 build_backend(
@@ -327,6 +337,7 @@ impl DeploymentConfig {
                     &target.extra_body,
                     &target.omit_body_fields,
                     target.reasoning_effort.clone(),
+                    target.reasoning_format.unwrap_or_default(),
                 )?,
                 None,
             ));
@@ -595,6 +606,9 @@ struct TargetConfig {
     /// Reasoning effort forced on every request to this target, replacing the caller's value.
     /// Only meaningful on `openai_chat` and `openai_responses` clients.
     reasoning_effort: Option<String>,
+    /// Field name for assistant reasoning replayed to this target. Only meaningful on
+    /// `openai_chat` clients; unset sends `reasoning`.
+    reasoning_format: Option<ReasoningFormat>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -653,6 +667,7 @@ fn build_backend(
     extra_body: &BTreeMap<String, Value>,
     omit_body_fields: &BTreeSet<String>,
     reasoning_effort: Option<String>,
+    reasoning_format: ReasoningFormat,
 ) -> RunnerResult<Backend> {
     if config.max_retries > MAX_CONFIGURED_RETRIES {
         return Err(RunnerError::configuration(format!(
@@ -699,6 +714,7 @@ fn build_backend(
         extra_body: extra_body.clone(),
         omit_body_fields: omit_body_fields.clone(),
         reasoning_effort,
+        reasoning_format,
         max_retries: config.max_retries,
         timeout: config.timeout_ms.map(Duration::from_millis),
     };
@@ -1197,6 +1213,69 @@ new = ["send_message"]
     }
 
     #[test]
+    fn a_target_reasoning_format_parses_and_is_rejected_where_unsupported() -> RunnerResult<()> {
+        let chat = "[targets.classifier]\nid = \"classifier/model\"\nllm_client = \"primary\"";
+        let responses = "[targets.strong]\nid = \"strong/model\"\nllm_client = \"responses\"";
+        let anthropic = "[targets.weak]\nid = \"weak/model\"\nllm_client = \"anthropic\"";
+        assert!(
+            [chat, responses, anthropic]
+                .iter()
+                .all(|t| VALID_CONFIG.contains(t))
+        );
+
+        for format in ["openai", "deepseek"] {
+            let set =
+                VALID_CONFIG.replace(chat, &format!("{chat}\nreasoning_format = \"{format}\""));
+            runner_from_toml(&set)?;
+        }
+
+        let unknown = VALID_CONFIG.replace(
+            chat,
+            &format!("{chat}\nreasoning_format = \"reasoning_content\""),
+        );
+        assert!(
+            error_message(&unknown).contains("unknown variant"),
+            "{}",
+            error_message(&unknown)
+        );
+
+        // Only the OpenAI Chat encoder reads the setting, so elsewhere it would do nothing.
+        for target in [responses, anthropic] {
+            let set = VALID_CONFIG.replace(
+                target,
+                &format!("{target}\nreasoning_format = \"deepseek\""),
+            );
+            assert!(
+                error_message(&set)
+                    .contains("reasoning_format is only supported on openai_chat clients"),
+                "{}",
+                error_message(&set)
+            );
+        }
+
+        // Two targets on one model id share a backend, so they must agree on the field name.
+        let alias = |format: &str| {
+            VALID_CONFIG.replace(
+                chat,
+                &format!(
+                    "{chat}\n\n[targets.classifier_alias]\nid = \"classifier/model\"\nllm_client = \"primary\"{format}"
+                ),
+            )
+        };
+        let conflicting = alias("\nreasoning_format = \"deepseek\"");
+        assert!(
+            error_message(&conflicting).contains(
+                "different reasoning_effort, reasoning_format, extra_body, or omit_body_fields"
+            ),
+            "{}",
+            error_message(&conflicting)
+        );
+        // Unset and "openai" send the same field, so they do not conflict.
+        runner_from_toml(&alias("\nreasoning_format = \"openai\""))?;
+        Ok(())
+    }
+
+    #[test]
     fn duplicate_targets_with_conflicting_settings_are_rejected() -> RunnerResult<()> {
         let strong = "[targets.strong]\nid = \"strong/model\"\nllm_client = \"responses\"";
         assert!(VALID_CONFIG.contains(strong));
@@ -1208,8 +1287,9 @@ new = ["send_message"]
             ),
         );
         assert!(
-            error_message(&conflicting)
-                .contains("different reasoning_effort, extra_body, or omit_body_fields"),
+            error_message(&conflicting).contains(
+                "different reasoning_effort, reasoning_format, extra_body, or omit_body_fields"
+            ),
             "{}",
             error_message(&conflicting)
         );
@@ -1646,6 +1726,7 @@ confidence_threshold = 0.5
             &target.extra_body,
             &target.omit_body_fields,
             None,
+            ReasoningFormat::default(),
         )?;
 
         assert_eq!(
@@ -1685,6 +1766,7 @@ confidence_threshold = 0.5
             &target.extra_body,
             &target.omit_body_fields,
             None,
+            ReasoningFormat::default(),
         )?;
 
         assert!(backend.omit_body_fields().contains("max_output_tokens"));
@@ -1702,7 +1784,14 @@ confidence_threshold = 0.5
                 "format = \"openai_chat\"\nbase_url = \"https://example.test/v1\"\n{setting}"
             );
             let config: LlmClientConfig = toml::from_str(&source).expect("valid deadline config");
-            let backend = build_backend("test", &config, &BTreeMap::new(), &BTreeSet::new(), None);
+            let backend = build_backend(
+                "test",
+                &config,
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                None,
+                ReasoningFormat::default(),
+            );
             if expected == Some(0) {
                 assert!(backend.is_err());
             } else {

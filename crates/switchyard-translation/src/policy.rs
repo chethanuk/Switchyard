@@ -57,6 +57,33 @@ pub struct TargetCapabilities {
     pub supports_code_execution: Option<bool>,
     pub supports_safety_settings: Option<bool>,
     pub openai_compatible: Option<bool>,
+    /// Field name this target expects for assistant reasoning sent back in request history.
+    #[serde(default)]
+    pub reasoning_format: ReasoningFormat,
+}
+
+/// Field name an OpenAI Chat target uses for assistant reasoning in request history.
+///
+/// Only one name is ever sent, because sending both would double the reasoning tokens.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ReasoningFormat {
+    /// Sends `reasoning`, the name most OpenAI-compatible APIs use.
+    #[default]
+    #[serde(rename = "openai")]
+    OpenAi,
+    /// Sends `reasoning_content`, the older DeepSeek name.
+    #[serde(rename = "deepseek")]
+    DeepSeek,
+}
+
+impl ReasoningFormat {
+    /// Returns the request message key this format writes reasoning under.
+    pub const fn request_key(self) -> &'static str {
+        match self {
+            Self::OpenAi => "reasoning",
+            Self::DeepSeek => "reasoning_content",
+        }
+    }
 }
 
 /// Provider-level profile that can be used to configure target capabilities.

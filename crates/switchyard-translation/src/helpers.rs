@@ -37,8 +37,18 @@ pub fn decode_request(wire_format: WireFormat, body: &Value) -> Result<LlmReques
 
 /// Encodes a normalized request into `wire_format`'s JSON body.
 pub fn encode_request(request: &LlmRequest, wire_format: WireFormat) -> Result<Value> {
+    encode_request_with_policy(request, wire_format, &DEFAULT_TRANSLATION_POLICY)
+}
+
+/// Encodes a normalized request into `wire_format`'s JSON body under `policy`,
+/// so a caller can apply a target's capabilities.
+pub fn encode_request_with_policy(
+    request: &LlmRequest,
+    wire_format: WireFormat,
+    policy: &TranslationPolicy,
+) -> Result<Value> {
     Ok(DEFAULT_TRANSLATION_ENGINE
-        .encode_request(wire_format, request, &DEFAULT_TRANSLATION_POLICY)?
+        .encode_request(wire_format, request, policy)?
         .body)
 }
 

@@ -106,6 +106,7 @@ endpoint, before it calls an upstream.
 | `system_prompt` | No | unset | System prompt prepended when this target serves a completion. |
 | `extra_body` | No | `{}` | Values merged into the upstream request when the request does not already set that key. |
 | `reasoning_effort` | No | unset | Reasoning effort forced on every request to this target, replacing the value the caller sent (`reasoning.effort` on `openai_responses`, `reasoning_effort` on `openai_chat`). Rejected on `anthropic_messages` clients. Use it to run one target at a different effort than the client asked for, for example a strong tier at `max` behind a client that sends `high`. Targets with different effort settings need distinct model IDs when used within one route. Separate routes may use the same model ID with separate `llm_clients` entries (same endpoint, different name). |
+| `reasoning_format` | No | `openai` | Field name used to send earlier assistant reasoning back to this target. `openai` sends `reasoning`. `deepseek` sends `reasoning_content`, which DeepSeek-style models need on the next turn. Only one field is ever sent. It applies when Switchyard rebuilds the request; an unchanged same-format request is forwarded as sent. Rejected on clients other than `openai_chat`. Targets with different settings need distinct model IDs on one client. |
 
 Within one route, callable targets with the same model ID must use the same `llm_client`.
 This includes completion targets and targets used for judging or classification. Switchyard rejects

@@ -31,7 +31,7 @@ pub use error::{LlmClientError, Result};
 pub use observation::{LlmCallObservation, RunObservation, RunObserver};
 pub use raw::RawResponse;
 pub use run::{ClientRouter, decide, run};
-pub use switchyard_translation::RawEventStream;
+pub use switchyard_translation::{RawEventStream, ReasoningFormat};
 
 /// Registers process-wide compatibility gauges with the global meter provider.
 pub fn initialize_metrics() {
