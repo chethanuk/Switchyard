@@ -8,8 +8,9 @@ pub mod common;
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
 use switchyard_translation::{
-    ContentBlock, FormatId, LossyConversionPolicy, TranslationEngine, TranslationPolicy,
-    WireFormat, prepare_request_for_target, sanitize_anthropic_tool_use_id,
+    ContentBlock, FormatId, LossyConversionPolicy, ReasoningFormat, TargetCapabilities,
+    TranslationEngine, TranslationPolicy, WireFormat, prepare_request_for_target,
+    sanitize_anthropic_tool_use_id,
 };
 
 use common::{REASONING_MODEL, normalized_policy, shell_tool_call};
@@ -1887,6 +1888,54 @@ fn openai_chat_encrypted_reasoning_details_retain_fallback() -> TestResult {
 
     assert_eq!(output["messages"][0]["reasoning_details"], details);
     assert_eq!(output["messages"][0]["reasoning"], "fallback text");
+    Ok(())
+}
+
+// Verifies a rebuilt Chat request sends assistant reasoning under the one field
+// name the target is configured for, whichever name the caller used.
+#[test]
+fn openai_chat_replay_uses_the_targets_configured_reasoning_field() -> TestResult {
+    let engine = TranslationEngine::default();
+    let encrypted = json!([{"type": "reasoning.encrypted", "data": "opaque"}]);
+    for sent_as in ["reasoning", "reasoning_content"] {
+        // Plain reasoning, and reasoning whose details cannot reproduce the text.
+        for details in [None, Some(&encrypted)] {
+            let mut assistant = json!({"role": "assistant", "content": "Visible answer"});
+            assistant[sent_as] = json!("Historical reasoning");
+            if let Some(details) = details {
+                assistant["reasoning_details"] = details.clone();
+            }
+            let body = json!({
+                "model": REASONING_MODEL,
+                "messages": [{"role": "user", "content": "hi"}, assistant]
+            });
+            for (format, expected, absent) in [
+                (ReasoningFormat::default(), "reasoning", "reasoning_content"),
+                (ReasoningFormat::OpenAi, "reasoning", "reasoning_content"),
+                (ReasoningFormat::DeepSeek, "reasoning_content", "reasoning"),
+            ] {
+                let policy = TranslationPolicy {
+                    target_capabilities: TargetCapabilities {
+                        reasoning_format: format,
+                        ..TargetCapabilities::default()
+                    },
+                    ..normalized_policy()
+                };
+                let output = engine
+                    .translate_request(
+                        WireFormat::OpenAiChat,
+                        WireFormat::OpenAiChat,
+                        &body,
+                        &policy,
+                    )?
+                    .body;
+                let case = format!("{sent_as}, details={}, {format:?}", details.is_some());
+                let message = &output["messages"][1];
+                assert_eq!(message[expected], "Historical reasoning", "{case}");
+                assert!(message.get(absent).is_none(), "{case} also sent {absent}");
+            }
+        }
+    }
     Ok(())
 }
 

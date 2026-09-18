@@ -894,7 +894,11 @@ fn encode_message_without_tool_results_to_openai(
         "role": role,
         "content": encode_openai_content(&content_blocks, message.role, diagnostics, policy)?,
     });
-    encode_openai_message_reasoning(&mut message_json, &message.content);
+    encode_openai_message_reasoning(
+        &mut message_json,
+        &message.content,
+        policy.target_capabilities.reasoning_format.request_key(),
+    );
     if !tool_calls.is_empty() {
         message_json["tool_calls"] = Value::Array(tool_calls);
         if message_json["content"] == Value::String(String::new()) {
@@ -905,17 +909,25 @@ fn encode_message_without_tool_results_to_openai(
 }
 
 // Adds either plaintext reasoning or structured details to an OpenAI Chat message.
-fn encode_openai_message_reasoning(message: &mut Value, content: &[ContentBlock]) {
+fn encode_openai_message_reasoning(
+    message: &mut Value,
+    content: &[ContentBlock],
+    reasoning_key: &str,
+) {
     let details = reasoning_details_from_blocks(content);
     if details.is_empty() {
-        encode_openai_message_plaintext_reasoning(message, content);
+        encode_openai_message_plaintext_reasoning(message, content, reasoning_key);
     } else {
-        encode_openai_message_structured_reasoning(message, content, details);
+        encode_openai_message_structured_reasoning(message, content, details, reasoning_key);
     }
 }
 
 // Adds reasoning blocks that have no structured provider representation.
-fn encode_openai_message_plaintext_reasoning(message: &mut Value, content: &[ContentBlock]) {
+fn encode_openai_message_plaintext_reasoning(
+    message: &mut Value,
+    content: &[ContentBlock],
+    reasoning_key: &str,
+) {
     let reasoning = content
         .iter()
         .filter_map(|block| match block {
@@ -929,7 +941,7 @@ fn encode_openai_message_plaintext_reasoning(message: &mut Value, content: &[Con
         .collect::<Vec<_>>()
         .join("\n");
     if !reasoning.is_empty() {
-        message["reasoning"] = Value::String(reasoning);
+        message[reasoning_key] = Value::String(reasoning);
     }
 }
 
@@ -938,6 +950,7 @@ fn encode_openai_message_structured_reasoning(
     message: &mut Value,
     content: &[ContentBlock],
     details: Vec<Value>,
+    reasoning_key: &str,
 ) {
     message["reasoning_details"] = Value::Array(details);
     let fallback = content
@@ -955,7 +968,7 @@ fn encode_openai_message_structured_reasoning(
         .collect::<Vec<_>>()
         .join("\n");
     if !fallback.is_empty() {
-        message["reasoning"] = Value::String(fallback);
+        message[reasoning_key] = Value::String(fallback);
     }
 }
 

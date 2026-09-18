@@ -19,8 +19,10 @@ use switchyard_protocol::{
     ModelId, Request, Response, RoutedLlmClient,
 };
 use switchyard_translation::{
-    TranslationError, WireFormat, decode_aggregated_response, decode_request, decode_stream,
-    encode_aggregated_response_with_extensions, encode_request, encode_stream_with_extensions,
+    TargetCapabilities, TranslationError, TranslationPolicy, WireFormat,
+    decode_aggregated_response, decode_request, decode_stream,
+    encode_aggregated_response_with_extensions, encode_request_with_policy,
+    encode_stream_with_extensions,
 };
 use tracing::Instrument;
 
@@ -245,7 +247,14 @@ impl TranslatingLlmClient {
         model: &ModelId,
         endpoint: UpstreamEndpoint,
     ) -> Result<EncodedResponse> {
-        let mut body = encode_request(&llm_request, wire_format)
+        let policy = TranslationPolicy {
+            target_capabilities: TargetCapabilities {
+                reasoning_format: backend.reasoning_format(),
+                ..TargetCapabilities::default()
+            },
+            ..TranslationPolicy::default()
+        };
+        let mut body = encode_request_with_policy(&llm_request, wire_format, &policy)
             .map_err(|error| LlmClientError::RequestEncoding(error.to_string()))?;
         // `encode_request` round-trips a preserved same-format body verbatim,
         // which keeps the caller's original `model`; force the resolved model so
@@ -1285,6 +1294,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+    use crate::ReasoningFormat;
     use crate::backend::HttpBackendConfig;
 
     fn config(base_url: &str) -> HttpBackendConfig {
@@ -1295,6 +1305,7 @@ mod tests {
             extra_headers: BTreeMap::new(),
             extra_body: BTreeMap::new(),
             reasoning_effort: None,
+            reasoning_format: Default::default(),
             max_retries: 0,
             timeout: None,
         }
@@ -1405,6 +1416,12 @@ mod tests {
     fn chat_map_with_effort(base_url: &str, effort: &str) -> Vec<ModelConfig> {
         let mut backend = config(base_url);
         backend.reasoning_effort = Some(effort.to_string());
+        vec![ModelConfig::new("gpt", Backend::OpenAiChat(backend), None)]
+    }
+
+    fn chat_map_with_reasoning_format(base_url: &str, format: ReasoningFormat) -> Vec<ModelConfig> {
+        let mut backend = config(base_url);
+        backend.reasoning_format = format;
         vec![ModelConfig::new("gpt", Backend::OpenAiChat(backend), None)]
     }
 
@@ -1924,6 +1941,68 @@ mod tests {
 
     /// A configured reasoning effort replaces the caller's value on both OpenAI wire formats,
     /// which `extra_body` (defaults only) cannot do.
+    /// A request rebuilt for an OpenAI Chat backend sends assistant reasoning under
+    /// the backend's configured field name, and never under both names.
+    #[tokio::test]
+    async fn rebuilt_chat_request_uses_the_backends_reasoning_field()
+    -> std::result::Result<(), Box<dyn Error + Sync + Send + 'static>> {
+        for (format, expected, absent) in [
+            (ReasoningFormat::OpenAi, "reasoning", "reasoning_content"),
+            (ReasoningFormat::DeepSeek, "reasoning_content", "reasoning"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/chat/completions"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "id": "1",
+                    "model": "gpt",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {}
+                })))
+                .mount(&server)
+                .await;
+            let client = TranslatingLlmClient::new(&chat_map_with_reasoning_format(
+                &format!("{}/v1", server.uri()),
+                format,
+            ))?;
+            // A Responses caller forces the Chat body to be rebuilt from the IR.
+            client
+                .call_rewrite_model_raw(
+                    json!({
+                        "model": "client-facing",
+                        "input": [
+                            {"type": "message", "role": "user", "content": "hi"},
+                            {"type": "reasoning", "content": [{"type": "reasoning_text", "text": "thinking..."}], "summary": []},
+                            {"type": "message", "role": "assistant", "content": "hello"},
+                            {"type": "message", "role": "user", "content": "next"}
+                        ]
+                    }),
+                    None,
+                    Some(&ModelId::from("gpt")),
+                    WireFormat::OpenAiResponses,
+                )
+                .await?;
+            let received = server
+                .received_requests()
+                .await
+                .ok_or("request recording should be enabled")?;
+            let received = received.first().ok_or("expected one upstream request")?;
+            let body: Value = serde_json::from_slice(&received.body)?;
+            let assistant = &body["messages"][1];
+            assert_eq!(assistant["role"], "assistant", "{body}");
+            assert_eq!(assistant[expected], "thinking...", "{format:?}: {body}");
+            assert!(
+                assistant.get(absent).is_none(),
+                "{format:?} also sent {absent}: {body}"
+            );
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn reasoning_effort_override_replaces_the_callers_effort()
     -> std::result::Result<(), Box<dyn Error + Sync + Send + 'static>> {

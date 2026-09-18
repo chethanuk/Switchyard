@@ -1013,6 +1013,7 @@ mod tests {
                         extra_headers: BTreeMap::new(),
                         extra_body: BTreeMap::from([("store".to_string(), json!(store))]),
                         reasoning_effort: None,
+                        reasoning_format: Default::default(),
                         max_retries: 0,
                         timeout: None,
                     };
@@ -1412,6 +1413,7 @@ mod tests {
                 extra_headers: BTreeMap::new(),
                 extra_body: BTreeMap::new(),
                 reasoning_effort: None,
+                reasoning_format: Default::default(),
                 max_retries: 2,
                 timeout: None,
             })
@@ -1510,6 +1512,7 @@ mod tests {
                 extra_headers: BTreeMap::new(),
                 extra_body: BTreeMap::new(),
                 reasoning_effort: None,
+                reasoning_format: Default::default(),
                 max_retries: 0,
                 timeout: None,
             })
