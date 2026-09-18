@@ -8,7 +8,7 @@ pub mod common;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use switchyard_translation::{
-    PreservationPolicy, TranslationEngine, TranslationPolicy, WireFormat,
+    PreservationPolicy, StopReason, TranslationEngine, TranslationPolicy, WireFormat,
 };
 
 use common::{
@@ -1101,5 +1101,90 @@ fn responses_custom_tool_call_output_round_trips_with_request_extensions() -> Te
     let call = &chat["choices"][0]["message"]["tool_calls"][0];
     assert_eq!(call["function"]["name"], "exec");
     assert_eq!(call["function"]["arguments"], "{\"input\":\"ls -la\"}");
+    Ok(())
+}
+
+// Verifies a Gemini tool-call response reaches Anthropic with its ids, stop reason and usage.
+#[test]
+fn gemini_response_translates_to_anthropic_with_tool_call_and_normalized_usage() -> TestResult {
+    let engine = TranslationEngine::default();
+    let body = json!({
+        "candidates": [{
+            "content": {"role": "model", "parts": [
+                {"text": "Checking."},
+                {"functionCall": {"name": "get_weather", "args": {"city": "Paris"}}}
+            ]},
+            "finishReason": "STOP",
+            "index": 0
+        }],
+        "usageMetadata": {
+            "promptTokenCount": 120,
+            "cachedContentTokenCount": 100,
+            "candidatesTokenCount": 15,
+            "thoughtsTokenCount": 10,
+            "totalTokenCount": 145
+        },
+        "responseId": "resp_gemini_1",
+        "modelVersion": "gemini-2.5-flash"
+    });
+
+    let anthropic = engine
+        .translate_response(
+            "gemini_generate_content",
+            WireFormat::AnthropicMessages,
+            &body,
+            &normalized_policy(),
+        )?
+        .body;
+
+    assert_eq!(anthropic["id"], "resp_gemini_1");
+    assert_eq!(anthropic["model"], "gemini-2.5-flash");
+    assert_eq!(anthropic["stop_reason"], "tool_use");
+    assert_eq!(anthropic["content"][0]["text"], "Checking.");
+    let tool_use = &anthropic["content"][1];
+    assert_eq!(tool_use["type"], "tool_use");
+    assert_eq!(tool_use["name"], "get_weather");
+    assert_eq!(tool_use["input"], json!({"city": "Paris"}));
+    // Gemini sent no id, so one is synthesized for clients that pair results by id.
+    assert!(tool_use["id"].as_str().is_some_and(|id| !id.is_empty()));
+    // Gemini's prompt count includes cached tokens; Anthropic's input count does not.
+    assert_eq!(
+        anthropic["usage"],
+        json!({
+            "input_tokens": 20,
+            "cache_read_input_tokens": 100,
+            "output_tokens": 15,
+            "output_tokens_details": {"thinking_tokens": 10}
+        })
+    );
+    Ok(())
+}
+
+// Verifies an explicit Gemini finish reason wins over a function call in the same candidate.
+#[test]
+fn gemini_aborted_finish_reason_does_not_become_a_clean_stop() -> TestResult {
+    let engine = TranslationEngine::default();
+    for (finish_reason, expected) in [
+        ("MALFORMED_FUNCTION_CALL", StopReason::Unknown),
+        ("MAX_TOKENS", StopReason::MaxTokens),
+        ("SAFETY", StopReason::ContentFilter),
+        ("STOP", StopReason::ToolUse),
+    ] {
+        let body = json!({"candidates": [{
+            "content": {"role": "model", "parts": [
+                {"functionCall": {"name": "get_weather", "args": {"city": "Paris"}}}
+            ]},
+            "finishReason": finish_reason
+        }]});
+
+        let decoded =
+            engine.decode_response("gemini_generate_content", &body, &normalized_policy())?;
+
+        assert_eq!(
+            decoded.response.outputs[0].stop_reason,
+            Some(expected),
+            "finishReason {finish_reason}"
+        );
+    }
     Ok(())
 }
