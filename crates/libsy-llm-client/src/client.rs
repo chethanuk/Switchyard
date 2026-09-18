@@ -260,7 +260,7 @@ impl TranslatingLlmClient {
             strip_anthropic_incompatible_fields(&mut body);
             strip_unsigned_thinking_blocks(&mut body);
         }
-        merge_extra_body(&mut body, backend.extra_body());
+        let injected = merge_extra_body(&mut body, backend.extra_body());
         // After the merge on purpose: the effort override must win over both the caller's
         // value and any `reasoning` default a target set through `extra_body`.
         apply_reasoning_effort(&mut body, backend);
@@ -277,6 +277,7 @@ impl TranslatingLlmClient {
 
         self.send_with_retries(&url, backend, &body, metadata, model, streaming)
             .await
+            .map_err(|error| extra_body_rejection(error, &injected, model))
     }
 
     // Sends the encoded body, retrying retryable failures within the backend's retry budget.
@@ -1135,14 +1136,58 @@ fn apply_reasoning_effort(body: &mut Value, backend: &Backend) {
     }
 }
 
-// Applies target defaults without overriding fields supplied by the caller.
-fn merge_extra_body(body: &mut Value, extra_body: &BTreeMap<String, Value>) {
+// Applies target defaults without overriding fields supplied by the caller, and returns the
+// keys it inserted.
+fn merge_extra_body(body: &mut Value, extra_body: &BTreeMap<String, Value>) -> Vec<String> {
     let Value::Object(object) = body else {
-        return;
+        return Vec::new();
     };
+    let mut injected = Vec::new();
     for (key, value) in extra_body {
-        object.entry(key.clone()).or_insert_with(|| value.clone());
+        if !object.contains_key(key) {
+            object.insert(key.clone(), value.clone());
+            injected.push(key.clone());
+        }
     }
+    injected
+}
+
+// `extra_body` is fixed in the target's TOML, so a 400/422 naming a key it injected fails every
+// request to this target alike: report it as a configuration error the operator can act on.
+// A content-policy denial passes through so `fallback_reason` can still route around it.
+fn extra_body_rejection(
+    error: LlmClientError,
+    injected: &[String],
+    model: &ModelId,
+) -> LlmClientError {
+    let LlmClientError::UpstreamHttp { status, body } = &error else {
+        return error;
+    };
+    let rejected: Vec<&str> = injected
+        .iter()
+        .map(String::as_str)
+        .filter(|key| names_key(body, key))
+        .collect();
+    let content_policy = serde_json::from_str::<Value>(body)
+        .is_ok_and(|value| value["error"]["code"] == "content_policy_violation");
+    if !matches!(status.as_u16(), 400 | 422) || rejected.is_empty() || content_policy {
+        return error;
+    }
+    LlmClientError::Configuration {
+        message: format!(
+            "upstream rejected a request parameter for model {model}. This target sets \
+             extra_body keys [{}], which the model does not accept. Remove or correct them in \
+             the target's extra_body. Upstream returned HTTP {status}: {body}",
+            rejected.join(", ")
+        ),
+    }
+}
+
+// Whether `body` mentions `key` as a whole word, so `top_k` does not match `top_k_max`.
+fn names_key(body: &str, key: &str) -> bool {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    body.match_indices(key)
+        .any(|(at, _)| !body[..at].ends_with(word) && !body[at + key.len()..].starts_with(word))
 }
 
 // Anthropic and Bedrock both cap a request at four blocks carrying
@@ -2051,6 +2096,69 @@ mod tests {
                 WireFormat::OpenAiChat,
             )
             .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upstream_rejecting_an_extra_body_key_is_a_configuration_error()
+    -> std::result::Result<(), Box<dyn Error + Sync + Send + 'static>> {
+        let named =
+            r#"{"error":{"message":"Unrecognized request argument supplied: enable_thinking"}}"#;
+        let longer = r#"{"error":{"message":"unknown field enable_thinking_budget"}}"#;
+        let policy = r#"{"error":{"code":"content_policy_violation","message":"enable_thinking"}}"#;
+        // (case, target injects the key, caller sets it, status, body, configuration error)
+        let cases = [
+            ("injected key named", true, false, 400, named, true),
+            ("422 names it", true, false, 422, named, true),
+            ("no extra_body", false, false, 400, named, false),
+            ("caller's own key", true, true, 400, named, false),
+            ("longer key", true, false, 400, longer, false),
+            ("content policy", true, false, 400, policy, false),
+            ("rate limit", true, false, 429, named, false),
+        ];
+        for (case, injects, caller_sets_key, status, body, configuration) in cases {
+            let extra_body = if injects {
+                BTreeMap::from([("enable_thinking".to_string(), json!(false))])
+            } else {
+                BTreeMap::new()
+            };
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(status).set_body_string(body))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let client = TranslatingLlmClient::new(&chat_map_with_extra_body(
+                &format!("{}/v1", server.uri()),
+                extra_body,
+            ))?;
+            let mut raw = json!({"model": "gpt", "messages": [{"role": "user", "content": "hi"}]});
+            if caller_sets_key {
+                raw["enable_thinking"] = json!(true);
+            }
+
+            let Err(error) = client
+                .call_rewrite_model_raw(
+                    raw,
+                    None,
+                    Some(&ModelId::from("gpt")),
+                    WireFormat::OpenAiChat,
+                )
+                .await
+            else {
+                panic!("{case}: expected an error");
+            };
+            match error {
+                LlmClientError::Configuration { message } if configuration => assert!(
+                    message.contains("model gpt") && message.contains("[enable_thinking]"),
+                    "{case}: {message}"
+                ),
+                LlmClientError::UpstreamHttp { status: got, .. } if !configuration => {
+                    assert_eq!(got.as_u16(), status, "{case}");
+                }
+                other => panic!("{case}: unexpected {other:?}"),
+            }
+        }
         Ok(())
     }
 
