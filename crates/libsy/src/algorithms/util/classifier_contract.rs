@@ -94,16 +94,9 @@ impl ClassifierContract {
                 Self::from_response_format(prompt_template, response_format, None)
             }
             ClassifierResponseFormat::JsonObject => {
-                validate_prompt(prompt_template)?;
                 let validator = compile_schema(schema)?;
-                let rendered_schema = serde_json::to_string_pretty(schema).map_err(|error| {
-                    algorithm_error(format!("response schema could not be rendered: {error}"))
-                })?;
-                let system_prompt = format!(
-                    "{prompt_template}\n\nReturn exactly one JSON object matching this JSON Schema:\n{rendered_schema}"
-                );
                 Self::from_response_format(
-                    &system_prompt,
+                    &schema_in_prompt(prompt_template, schema)?,
                     json!({"type": "json_object"}),
                     Some(validator),
                 )
@@ -111,8 +104,16 @@ impl ClassifierContract {
         }
     }
 
-    /// Builds a provider response format around a user-supplied inner JSON Schema.
-    pub(crate) fn from_inner_schema(prompt_template: &str, schema: Value) -> Result<Self> {
+    /// Builds a contract around a user-supplied inner JSON Schema.
+    ///
+    /// The schema is validated locally in both modes. JSON Schema mode sends it through the
+    /// provider's strict wrapper; JSON Object mode appends it to the prompt, because the
+    /// provider then guarantees only that the reply is JSON.
+    pub(crate) fn from_inner_schema(
+        prompt_template: &str,
+        schema: Value,
+        response_format_type: ClassifierResponseFormat,
+    ) -> Result<Self> {
         if schema.get("json_schema").is_some() {
             return Err(LibsyError::AlgorithmError {
                 message:
@@ -121,18 +122,25 @@ impl ClassifierContract {
             });
         }
         let validator = compile_schema(&schema)?;
-        Self::from_response_format(
-            prompt_template,
-            json!({
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "switchyard_classifier_response",
-                    "strict": true,
-                    "schema": schema,
-                }
-            }),
-            Some(validator),
-        )
+        match response_format_type {
+            ClassifierResponseFormat::JsonSchema => Self::from_response_format(
+                prompt_template,
+                json!({
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "switchyard_classifier_response",
+                        "strict": true,
+                        "schema": schema,
+                    }
+                }),
+                Some(validator),
+            ),
+            ClassifierResponseFormat::JsonObject => Self::from_response_format(
+                &schema_in_prompt(prompt_template, &schema)?,
+                json!({"type": "json_object"}),
+                Some(validator),
+            ),
+        }
     }
 
     fn from_response_format(
@@ -185,6 +193,21 @@ fn validate_prompt(prompt_template: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Appends the verdict schema to a prompt for JSON Object mode.
+///
+/// The template is validated before appending: the appended text makes the prompt non-empty,
+/// so an empty template would otherwise pass the check `from_response_format` runs on the
+/// combined string.
+fn schema_in_prompt(prompt_template: &str, schema: &Value) -> Result<String> {
+    validate_prompt(prompt_template)?;
+    let rendered_schema = serde_json::to_string_pretty(schema).map_err(|error| {
+        algorithm_error(format!("response schema could not be rendered: {error}"))
+    })?;
+    Ok(format!(
+        "{prompt_template}\n\nReturn exactly one JSON object matching this JSON Schema:\n{rendered_schema}"
+    ))
 }
 
 fn compile_schema(schema: &Value) -> Result<Validator> {
@@ -307,6 +330,7 @@ mod tests {
                 "required": ["decision"],
                 "additionalProperties": false
             }),
+            ClassifierResponseFormat::JsonSchema,
         )?;
 
         assert_eq!(
@@ -335,12 +359,64 @@ mod tests {
 
     #[test]
     fn a_provider_wrapper_is_rejected_as_an_inner_schema() {
-        let error = ClassifierContract::from_inner_schema(
-            "classify",
-            json!({"json_schema": {"schema": {"type": "object"}}}),
-        )
-        .expect_err("provider wrapper should be rejected");
+        for response_format_type in [
+            ClassifierResponseFormat::JsonSchema,
+            ClassifierResponseFormat::JsonObject,
+        ] {
+            let error = ClassifierContract::from_inner_schema(
+                "classify",
+                json!({"json_schema": {"schema": {"type": "object"}}}),
+                response_format_type,
+            )
+            .expect_err("provider wrapper should be rejected");
 
-        assert!(error.to_string().contains("inner JSON Schema"));
+            assert!(
+                error.to_string().contains("inner JSON Schema"),
+                "{response_format_type:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_custom_contract_can_request_a_json_object() -> Result<()> {
+        let contract = ClassifierContract::from_inner_schema(
+            "Choose a target.",
+            json!({
+                "type": "object",
+                "properties": {"target": {"type": "string", "enum": ["sonnet", "opus"]}},
+                "required": ["target"],
+                "additionalProperties": false
+            }),
+            ClassifierResponseFormat::JsonObject,
+        )?;
+
+        assert_eq!(contract.response_format(), &json!({"type": "json_object"}));
+        assert!(contract.system_prompt().starts_with("Choose a target."));
+        assert!(contract.system_prompt().contains("JSON Schema"));
+        assert!(contract.system_prompt().contains("\"target\""));
+        // The provider no longer enforces the schema, so the local validator must.
+        contract.validate_verdict(&json!({"target": "sonnet"}))?;
+        assert!(
+            contract
+                .validate_verdict(&json!({"target": "unknown"}))
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_prompt_is_rejected_in_json_object_mode() {
+        let error = ClassifierContract::from_inner_schema(
+            " ",
+            json!({"type": "object"}),
+            ClassifierResponseFormat::JsonObject,
+        )
+        .expect_err("an empty prompt should be rejected before the schema is appended");
+
+        assert!(
+            error
+                .to_string()
+                .contains("classifier prompt must not be empty")
+        );
     }
 }
