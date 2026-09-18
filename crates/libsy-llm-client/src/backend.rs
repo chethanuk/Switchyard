@@ -10,6 +10,7 @@ use reqwest::RequestBuilder;
 use reqwest::header::HeaderValue;
 use serde_json::Value;
 use switchyard_protocol::{Metadata, WireFormat};
+use switchyard_translation::ReasoningFormat;
 
 use crate::error::{LlmClientError, Result, is_overflow_body};
 
@@ -61,6 +62,8 @@ pub struct HttpBackendConfig {
     /// sent. Responses carries it as `reasoning.effort`, Chat Completions as `reasoning_effort`;
     /// Anthropic has no equivalent and rejects the setting at configuration time.
     pub reasoning_effort: Option<String>,
+    /// Field name used for assistant reasoning replayed to an OpenAI Chat backend.
+    pub reasoning_format: ReasoningFormat,
     /// Additional attempts after the initial upstream request.
     pub max_retries: u32,
     /// Deadline for one complete response, including retries, retry delays, and stream reads.
@@ -77,6 +80,7 @@ impl fmt::Debug for HttpBackendConfig {
             .field("extra_header_names", &self.extra_headers.keys())
             .field("extra_body_keys", &self.extra_body.keys())
             .field("reasoning_effort", &self.reasoning_effort)
+            .field("reasoning_format", &self.reasoning_format)
             .field("max_retries", &self.max_retries)
             .field("timeout", &self.timeout)
             .finish()
@@ -260,6 +264,11 @@ impl Backend {
         self.config().reasoning_effort.as_deref()
     }
 
+    /// Field name used for assistant reasoning replayed to this backend.
+    pub fn reasoning_format(&self) -> ReasoningFormat {
+        self.config().reasoning_format
+    }
+
     /// Additional attempts allowed after the initial request.
     pub fn max_retries(&self) -> u32 {
         self.config().max_retries
@@ -375,6 +384,7 @@ mod tests {
             extra_headers: BTreeMap::new(),
             extra_body: BTreeMap::new(),
             reasoning_effort: None,
+            reasoning_format: Default::default(),
             max_retries: 0,
             timeout: None,
         }

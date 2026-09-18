@@ -70,6 +70,7 @@ fn build_client() -> switchyard_llm_client::Result<TranslatingLlmClient> {
         extra_headers: BTreeMap::new(),
         extra_body: BTreeMap::new(),
         reasoning_effort: None,
+        reasoning_format: Default::default(),
         max_retries: 2,
         timeout: None,
     };
