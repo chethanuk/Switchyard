@@ -1,0 +1,28 @@
+schema_version = 1
+
+[llm_clients.mock]
+format = "openai_chat"
+base_url = "http://127.0.0.1:18431/v1"
+
+[targets.judge]
+id = "judge/model"
+llm_client = "mock"
+
+[targets.strong]
+id = "strong/model"
+llm_client = "mock"
+
+[targets.weak]
+id = "weak/model"
+llm_client = "mock"
+
+[routes.custom]
+id = "switchyard/custom"
+type = "llm_classifier"
+mode = "custom"
+response_format_type = "json_object"
+models = { judge = ["judge"], capable = ["strong"], efficient = ["weak"], any = ["strong", "weak"] }
+default_target = "efficient"
+prompt = "Select a target for this task."
+response_schema = '{"type":"object","properties":{"target":{"type":"string","enum":["capable","efficient"]}},"required":["target"],"additionalProperties":false}'
+policy = { type = "target_selector", selector = "/target" }
