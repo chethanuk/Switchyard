@@ -1959,8 +1959,6 @@ mod tests {
         Ok(())
     }
 
-    /// A configured reasoning effort replaces the caller's value on both OpenAI wire formats,
-    /// which `extra_body` (defaults only) cannot do.
     /// A request rebuilt for an OpenAI Chat backend sends assistant reasoning under
     /// the backend's configured field name, and never under both names.
     #[tokio::test]
@@ -2023,6 +2021,8 @@ mod tests {
         Ok(())
     }
 
+    /// A configured reasoning effort replaces the caller's value on both OpenAI wire formats,
+    /// which `extra_body` (defaults only) cannot do.
     #[tokio::test]
     async fn reasoning_effort_override_replaces_the_callers_effort()
     -> std::result::Result<(), Box<dyn Error + Sync + Send + 'static>> {
