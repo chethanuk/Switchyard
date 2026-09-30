@@ -860,9 +860,12 @@ fn encode_anthropic_messages(
     Ok(encoded)
 }
 
-// Maps preserved OpenAI-style stop extensions to Anthropic stop sequences.
+// Maps preserved OpenAI-style or Gemini stop extensions to Anthropic stop sequences.
 fn anthropic_stop_sequences_from_extensions(extensions: &Map<String, Value>) -> Option<Value> {
-    match extensions.get("stop") {
+    match extensions
+        .get("stop")
+        .or_else(|| extensions.get("stop_sequences"))
+    {
         Some(Value::String(stop)) => Some(json!([stop])),
         Some(Value::Array(stops)) => Some(Value::Array(stops.clone())),
         _ => None,

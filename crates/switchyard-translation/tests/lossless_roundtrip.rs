@@ -6,7 +6,8 @@
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
 use switchyard_translation::{
-    PRESERVATION_METADATA_KEY, PreservationPolicy, TranslationEngine, TranslationPolicy, WireFormat,
+    FormatId, PRESERVATION_METADATA_KEY, PreservationPolicy, TranslationEngine, TranslationPolicy,
+    WireFormat,
 };
 
 const FORMATS: [WireFormat; 3] = [
@@ -237,6 +238,94 @@ fn in_memory_preservation_replays_exact_original_when_encoding_from_the_same_ir(
     let encoded = engine.encode_request(WireFormat::OpenAiResponses, &decoded.request, &policy)?;
 
     assert_eq!(encoded.body, original);
+    Ok(())
+}
+
+// Verifies Gemini requests and responses round-trip exactly through each built-in format.
+#[test]
+fn embedded_preservation_roundtrips_gemini_through_each_builtin_format_exactly() -> TestResult {
+    const GEMINI: &str = "gemini_generate_content";
+    let engine = TranslationEngine::default();
+    let policy = embed_policy();
+    let request = json!({
+        "model": "gemini-2.5-flash",
+        "systemInstruction": {"parts": [{"text": "Answer in one line."}]},
+        "contents": [
+            {"role": "user", "parts": [
+                {"text": "What is in this image?"},
+                {"inlineData": {"mimeType": "image/png", "data": "iVBORw0KGgo="}}
+            ]},
+            {"role": "model", "parts": [
+                {"text": "Let me look it up.", "thought": true, "thoughtSignature": "c2lnbmF0dXJl"},
+                {"functionCall": {"name": "lookup", "args": {"query": "cat"}}}
+            ]},
+            {"role": "user", "parts": [
+                {"functionResponse": {"name": "lookup", "response": {"answer": "a cat"}}}
+            ]}
+        ],
+        "tools": [{"functionDeclarations": [{
+            "name": "lookup",
+            "parameters": {"type": "OBJECT", "properties": {"query": {"type": "STRING"}}}
+        }]}],
+        "safetySettings": [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"}
+        ],
+        "generationConfig": {
+            "temperature": 0.4,
+            "stopSequences": ["END"],
+            "thinkingConfig": {"thinkingBudget": 512}
+        }
+    });
+    let response = json!({
+        "candidates": [{
+            "content": {"role": "model", "parts": [
+                {"text": "Weighing it.", "thought": true},
+                {"text": "A cat."}
+            ]},
+            "finishReason": "STOP",
+            "index": 0,
+            "safetyRatings": []
+        }],
+        "usageMetadata": {
+            "promptTokenCount": 40,
+            "candidatesTokenCount": 3,
+            "thoughtsTokenCount": 7,
+            "totalTokenCount": 50
+        },
+        "responseId": "resp_gemini_2",
+        "modelVersion": "gemini-2.5-flash"
+    });
+
+    let targets = std::iter::once(FormatId::new(GEMINI)).chain(FORMATS.map(FormatId::from));
+    for target in targets {
+        let translated = engine
+            .translate_request(GEMINI, target.clone(), &request, &policy)?
+            .body;
+        if target.as_str() != GEMINI {
+            assert_eq!(
+                translated["metadata"][PRESERVATION_METADATA_KEY]["requests"][GEMINI], request,
+                "{target} request should embed the Gemini original"
+            );
+        }
+        let roundtripped = engine
+            .translate_request(target.clone(), GEMINI, &translated, &policy)?
+            .body;
+        assert_eq!(
+            roundtripped, request,
+            "request Gemini -> {target} -> Gemini"
+        );
+
+        let translated = engine
+            .translate_response(GEMINI, target.clone(), &response, &policy)?
+            .body;
+        let roundtripped = engine
+            .translate_response(target.clone(), GEMINI, &translated, &policy)?
+            .body;
+        assert_eq!(
+            roundtripped, response,
+            "response Gemini -> {target} -> Gemini"
+        );
+    }
     Ok(())
 }
 

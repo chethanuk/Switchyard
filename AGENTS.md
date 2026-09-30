@@ -11,7 +11,7 @@ Core components in `crates/`. These are layered:
 
 Support components (also in `crates/`):
 - `protocol`: Types shared between many components.
-- `switchyard-translation`: Convert between various JSON inference formats: OpenAI Chat Completions, OpenAI Responses and Anthropic Messages. We convert to/from a vendor neutral independent representation (IR). All the core components with with this IR.
+- `switchyard-translation`: Convert between various JSON inference formats: OpenAI Chat Completions, OpenAI Responses, Anthropic Messages and Gemini `generateContent` (buffered only). We convert to/from a vendor neutral independent representation (IR). All the core components with with this IR.
 
 Integrations:
 - `crates/switchyard-nemo-relay-plugin/`: Integrate with NeMo Relay.
