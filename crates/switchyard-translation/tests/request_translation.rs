@@ -2414,6 +2414,61 @@ fn openai_chat_replay_uses_the_targets_configured_reasoning_field() -> TestResul
     Ok(())
 }
 
+// Verifies a DeepSeek-format target still gets `reasoning_content` when the
+// history's `reasoning_details` already carry the same text, since DeepSeek does
+// not read `reasoning_details`. The OpenAI format keeps the text only in details.
+#[test]
+fn deepseek_target_gets_reasoning_content_even_when_details_hold_the_text() -> TestResult {
+    let engine = TranslationEngine::default();
+    let body = json!({
+        "model": REASONING_MODEL,
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": "Visible answer",
+                "reasoning_content": "Historical reasoning",
+                "reasoning_details": [{"type": "reasoning.text", "text": "Historical reasoning"}]
+            }
+        ]
+    });
+    for (format, expected_content) in [
+        (ReasoningFormat::DeepSeek, Some("Historical reasoning")),
+        (ReasoningFormat::OpenAi, None),
+    ] {
+        let policy = TranslationPolicy {
+            target_capabilities: TargetCapabilities {
+                reasoning_format: format,
+                ..TargetCapabilities::default()
+            },
+            ..normalized_policy()
+        };
+        let output = engine
+            .translate_request(
+                WireFormat::OpenAiChat,
+                WireFormat::OpenAiChat,
+                &body,
+                &policy,
+            )?
+            .body;
+        let message = &output["messages"][1];
+        assert_eq!(
+            message.get("reasoning_content").and_then(Value::as_str),
+            expected_content,
+            "{format:?}"
+        );
+        assert!(
+            message.get("reasoning").is_none(),
+            "{format:?} sent reasoning"
+        );
+        assert_eq!(
+            message["reasoning_details"][0]["text"], "Historical reasoning",
+            "{format:?}"
+        );
+    }
+    Ok(())
+}
+
 // Verifies merged reasoning re-emerges as a Responses reasoning item ahead of
 // the turn's function call when encoding back to the Responses format.
 #[test]

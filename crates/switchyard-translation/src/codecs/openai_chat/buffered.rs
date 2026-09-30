@@ -23,7 +23,7 @@ use crate::llm::{
     MediaSource, Message, OutputParams, ProviderExtensions, ReasoningParams, ResponseOutput, Role,
     SamplingParams, StopReason, ToolCall, ToolChoice, ToolDefinition, ToolResult, Usage,
 };
-use crate::policy::{DeterministicIdPolicy, TranslationPolicy};
+use crate::policy::{DeterministicIdPolicy, ReasoningFormat, TranslationPolicy};
 use crate::util::{
     capture_request_preservation, capture_response_preservation, embed_preservation,
     exact_preserved_request, exact_preserved_response, json_string, object, push_lossy,
@@ -925,7 +925,7 @@ fn encode_message_without_tool_results_to_openai(
     encode_openai_message_reasoning(
         &mut message_json,
         &message.content,
-        policy.target_capabilities.reasoning_format.request_key(),
+        policy.target_capabilities.reasoning_format,
     );
     if !tool_calls.is_empty() {
         message_json["tool_calls"] = Value::Array(tool_calls);
@@ -940,13 +940,13 @@ fn encode_message_without_tool_results_to_openai(
 fn encode_openai_message_reasoning(
     message: &mut Value,
     content: &[ContentBlock],
-    reasoning_key: &str,
+    format: ReasoningFormat,
 ) {
     let details = reasoning_details_from_blocks(content);
     if details.is_empty() {
-        encode_openai_message_plaintext_reasoning(message, content, reasoning_key);
+        encode_openai_message_plaintext_reasoning(message, content, format.request_key());
     } else {
-        encode_openai_message_structured_reasoning(message, content, details, reasoning_key);
+        encode_openai_message_structured_reasoning(message, content, details, format);
     }
 }
 
@@ -974,11 +974,12 @@ fn encode_openai_message_plaintext_reasoning(
 }
 
 // Adds exact provider details and text that cannot be recovered from those details.
+// DeepSeek does not read `reasoning_details`, so that format always gets the text.
 fn encode_openai_message_structured_reasoning(
     message: &mut Value,
     content: &[ContentBlock],
     details: Vec<Value>,
-    reasoning_key: &str,
+    format: ReasoningFormat,
 ) {
     message["reasoning_details"] = Value::Array(details);
     let fallback = content
@@ -986,8 +987,10 @@ fn encode_openai_message_structured_reasoning(
         .filter_map(|block| match block {
             ContentBlock::Reasoning { text, details, .. }
                 if !details.is_empty()
-                    && reasoning_text_from_details(details).as_deref() != Some(text.as_str())
-                    && !text.is_empty() =>
+                    && !text.is_empty()
+                    && (format == ReasoningFormat::DeepSeek
+                        || reasoning_text_from_details(details).as_deref()
+                            != Some(text.as_str())) =>
             {
                 Some(text.as_str())
             }
@@ -996,7 +999,7 @@ fn encode_openai_message_structured_reasoning(
         .collect::<Vec<_>>()
         .join("\n");
     if !fallback.is_empty() {
-        message[reasoning_key] = Value::String(fallback);
+        message[format.request_key()] = Value::String(fallback);
     }
 }
 
