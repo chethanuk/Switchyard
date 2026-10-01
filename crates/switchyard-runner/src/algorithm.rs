@@ -108,6 +108,7 @@ struct CapabilityClassifierRouteConfig {
     message_hash_fallback: bool,
     recent_turn_window: Option<usize>,
     prompt: Option<String>,
+    prompt_suffix: Option<String>,
     response_format_type: ClassifierResponseFormat,
     max_output_tokens: u64,
 }
@@ -118,6 +119,7 @@ struct EscalationClassifierRouteConfig {
     strong_target: String,
     weak_target: String,
     prompt: Option<String>,
+    prompt_suffix: Option<String>,
     response_format_type: ClassifierResponseFormat,
     max_output_tokens: u64,
     judge: EscalationJudgeConfig,
@@ -251,6 +253,8 @@ pub struct LlmClassifierRouteConfig {
     pub recent_turn_window: Option<usize>,
     /// Replaces the packaged judge prompt. Required in custom mode.
     pub prompt: Option<String>,
+    /// Appended to the packaged or overridden judge prompt. Not allowed in custom mode.
+    pub prompt_suffix: Option<String>,
     /// How the judge is asked for structured output. Use `json_object` when the
     /// provider cannot do JSON Schema.
     pub response_format_type: ClassifierResponseFormat,
@@ -529,7 +533,7 @@ impl StageClassifierConfig {
             judge: CapabilityJudgeConfig::Llm(LlmCapabilityConfig {
                 base_threshold: self.base_threshold,
                 threshold_step: self.threshold_step,
-                contract: classifier_contract(self.prompt.as_deref())
+                contract: classifier_contract(self.prompt.as_deref(), None)
                     .with_response_format_type(self.response_format_type),
                 max_output_tokens: self.max_output_tokens,
             }),
@@ -890,6 +894,7 @@ impl LlmClassifierRouteConfig {
             message_hash_fallback,
             recent_turn_window,
             prompt,
+            prompt_suffix,
             response_format_type,
             max_output_tokens,
             escalation,
@@ -952,6 +957,7 @@ impl LlmClassifierRouteConfig {
                         message_hash_fallback: *message_hash_fallback,
                         recent_turn_window: *recent_turn_window,
                         prompt: prompt.clone(),
+                        prompt_suffix: prompt_suffix.clone(),
                         response_format_type: *response_format_type,
                         max_output_tokens: *max_output_tokens,
                     },
@@ -995,6 +1001,7 @@ impl LlmClassifierRouteConfig {
                             weak_target,
                         )?,
                         prompt: prompt.clone(),
+                        prompt_suffix: prompt_suffix.clone(),
                         response_format_type: *response_format_type,
                         max_output_tokens: *max_output_tokens,
                         judge: required_classifier_field(route_name, "escalation", escalation)?,
@@ -1008,6 +1015,7 @@ impl LlmClassifierRouteConfig {
                     || base_threshold.is_some()
                     || threshold_step.is_some()
                     || escalation.is_some()
+                    || prompt_suffix.is_some()
                     || *response_format_type != ClassifierResponseFormat::JsonSchema
                 {
                     return Err(AlgorithmConfigError::new(format!(
@@ -1247,8 +1255,11 @@ fn build_algorithm(
                         judge: CapabilityJudgeConfig::Llm(LlmCapabilityConfig {
                             base_threshold: config.base_threshold,
                             threshold_step: config.threshold_step,
-                            contract: classifier_contract(config.prompt.as_deref())
-                                .with_response_format_type(config.response_format_type),
+                            contract: classifier_contract(
+                                config.prompt.as_deref(),
+                                config.prompt_suffix.as_deref(),
+                            )
+                            .with_response_format_type(config.response_format_type),
                             max_output_tokens: config.max_output_tokens,
                         }),
                         fail_open: config.fail_open,
@@ -1262,7 +1273,10 @@ fn build_algorithm(
                 }
                 LlmClassifierModeConfig::Escalation(config) => {
                     LlmTaskClassifier::new(LlmClassifierConfig::Escalation {
-                        contract: classifier_contract(config.prompt.as_deref())
+                        contract: classifier_contract(
+                            config.prompt.as_deref(),
+                            config.prompt_suffix.as_deref(),
+                        )
                             .with_response_format_type(config.response_format_type),
                         config: config.judge,
                         max_output_tokens: config.max_output_tokens,
@@ -1491,10 +1505,18 @@ const fn default_fail_open() -> bool {
     true
 }
 
-fn classifier_contract(prompt: Option<&str>) -> ClassifierContractConfig {
-    prompt.map_or_else(ClassifierContractConfig::default, |prompt| {
-        ClassifierContractConfig::default().with_prompt(prompt)
-    })
+fn classifier_contract(
+    prompt: Option<&str>,
+    prompt_suffix: Option<&str>,
+) -> ClassifierContractConfig {
+    let mut contract = ClassifierContractConfig::default();
+    if let Some(prompt) = prompt {
+        contract = contract.with_prompt(prompt);
+    }
+    if let Some(suffix) = prompt_suffix {
+        contract = contract.with_prompt_suffix(suffix);
+    }
+    contract
 }
 
 fn default_classifier_max_output_tokens() -> u64 {

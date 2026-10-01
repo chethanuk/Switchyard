@@ -28,6 +28,8 @@ pub struct ClassifierContractConfig {
     #[serde(default)]
     prompt: Option<String>,
     #[serde(default)]
+    prompt_suffix: Option<String>,
+    #[serde(default)]
     response_format_type: ClassifierResponseFormat,
 }
 
@@ -41,6 +43,17 @@ impl ClassifierContractConfig {
     /// Returns the configured prompt override.
     pub fn prompt(&self) -> Option<&str> {
         self.prompt.as_deref()
+    }
+
+    /// Appends guidance to the packaged or overridden classifier prompt.
+    pub fn with_prompt_suffix(mut self, suffix: impl Into<String>) -> Self {
+        self.prompt_suffix = Some(suffix.into());
+        self
+    }
+
+    /// Returns the configured prompt suffix.
+    pub fn prompt_suffix(&self) -> Option<&str> {
+        self.prompt_suffix.as_deref()
     }
 
     /// Selects the provider-side structured-output mode.
@@ -77,7 +90,23 @@ impl ClassifierContract {
         default_prompt: &str,
         response_format_json: &str,
     ) -> Result<Self> {
-        let prompt_template = config.prompt().unwrap_or(default_prompt);
+        let base_prompt = config.prompt().unwrap_or(default_prompt);
+        // Validate the base first so a blank prompt cannot be masked by a suffix. A blank suffix
+        // leaves the prompt byte-identical; the suffix joins the template, so it precedes any
+        // schema block appended below.
+        validate_prompt(base_prompt)?;
+        let composed;
+        let prompt_template = match config
+            .prompt_suffix()
+            .map(str::trim)
+            .filter(|suffix| !suffix.is_empty())
+        {
+            Some(suffix) => {
+                composed = format!("{base_prompt}\n\n{suffix}");
+                composed.as_str()
+            }
+            None => base_prompt,
+        };
         let response_format: Value =
             serde_json::from_str(response_format_json).map_err(|error| {
                 LibsyError::AlgorithmError {
@@ -282,6 +311,88 @@ mod tests {
             error
                 .to_string()
                 .contains("Switchyard supplies the schema automatically")
+        );
+    }
+
+    #[test]
+    fn prompt_suffix_composes_with_packaged_prompt() {
+        const SCHEMA: &str = r#"{"json_schema":{"schema":{"type":"object"}}}"#;
+        let default = ClassifierContractConfig::default;
+        // (name, config, response_format, expected system prompt or error substring)
+        let cases: Vec<(
+            &str,
+            ClassifierContractConfig,
+            &str,
+            std::result::Result<&str, &str>,
+        )> = vec![
+            ("unset", default(), SCHEMA, Ok("packaged prompt")),
+            (
+                "suffix",
+                default().with_prompt_suffix("Step."),
+                SCHEMA,
+                Ok("packaged prompt\n\nStep."),
+            ),
+            (
+                "override plus suffix",
+                default()
+                    .with_prompt("Custom.")
+                    .with_prompt_suffix(" Step.\n"),
+                SCHEMA,
+                Ok("Custom.\n\nStep."),
+            ),
+            (
+                "blank suffix equals unset",
+                default().with_prompt_suffix("  "),
+                SCHEMA,
+                Ok("packaged prompt"),
+            ),
+            (
+                "schema placeholder in suffix",
+                default().with_prompt_suffix("see {{RESPONSE_SCHEMA}}"),
+                SCHEMA,
+                Err("Switchyard supplies the schema automatically"),
+            ),
+            (
+                "blank prompt plus suffix",
+                default().with_prompt("  ").with_prompt_suffix("x"),
+                SCHEMA,
+                Err("prompt must not be empty"),
+            ),
+        ];
+        for (name, config, format, expected) in cases {
+            let got = ClassifierContract::from_config(&config, "packaged prompt", format);
+            match expected {
+                Ok(prompt) => assert_eq!(
+                    got.unwrap_or_else(|e| panic!("{name}: {e}"))
+                        .system_prompt(),
+                    prompt,
+                    "{name}"
+                ),
+                Err(needle) => {
+                    let error = got
+                        .err()
+                        .unwrap_or_else(|| panic!("{name}: expected error"));
+                    assert!(error.to_string().contains(needle), "{name}: {error}");
+                }
+            }
+        }
+
+        let contract = ClassifierContract::from_config(
+            &default()
+                .with_prompt_suffix("Step.")
+                .with_response_format_type(ClassifierResponseFormat::JsonObject),
+            "packaged prompt",
+            SCHEMA,
+        )
+        .expect("json_object contract");
+        let prompt = contract.system_prompt();
+        let suffix = prompt.find("Step.").expect("suffix in prompt");
+        let schema = prompt
+            .find("Return exactly one JSON object")
+            .expect("schema block in prompt");
+        assert!(
+            suffix < schema,
+            "suffix must precede schema block: {prompt}"
         );
     }
 

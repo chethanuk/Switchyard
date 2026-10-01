@@ -1257,13 +1257,13 @@ new = ["send_message"]
     fn classifier_prompts_are_configurable_in_both_modes() -> RunnerResult<()> {
         let capability = VALID_CONFIG.replace(
             "base_threshold = 0.5",
-            "base_threshold = 0.5\nprompt = \"custom capability rubric\"",
+            "base_threshold = 0.5\nprompt = \"custom capability rubric\"\nprompt_suffix = \"tool-step rubric\"",
         );
         runner_from_toml(&capability)?;
 
         let escalation = VALID_CONFIG.replace(
             "base_threshold = 0.5",
-            "base_threshold = 0.5\nprompt = \"custom trajectory rubric\"\nescalation = { confirmations = 2 }",
+            "base_threshold = 0.5\nprompt = \"custom trajectory rubric\"\nprompt_suffix = \"tool-step rubric\"\nescalation = { confirmations = 2 }",
         );
         runner_from_toml(&escalation)?;
 
@@ -1282,6 +1282,38 @@ new = ["send_message"]
                 .contains("Switchyard supplies the schema automatically")
         );
         Ok(())
+    }
+
+    #[test]
+    fn prompt_suffix_reaches_both_classifier_modes() {
+        let cases = [
+            ("capability", "prompt_suffix = \"{{RESPONSE_SCHEMA}}\""),
+            (
+                "escalation",
+                "prompt_suffix = \"{{RESPONSE_SCHEMA}}\"\nescalation = { confirmations = 2 }",
+            ),
+        ];
+        for (name, fields) in cases {
+            let config = VALID_CONFIG.replace(
+                "base_threshold = 0.5",
+                &format!("base_threshold = 0.5\n{fields}"),
+            );
+            assert!(
+                error_message(&config).contains("Switchyard supplies the schema automatically"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn mode_custom_rejects_prompt_suffix() {
+        let mixed =
+            with_subagent_llm_classifier(VALID_CONFIG, "passthrough", "\nprompt_suffix = \"x\"");
+
+        assert!(
+            error_message(&mixed)
+                .contains("mode custom cannot use capability or escalation fields")
+        );
     }
 
     #[test]
