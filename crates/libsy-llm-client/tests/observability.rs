@@ -1595,6 +1595,111 @@ async fn upstream_body_is_redacted_from_the_client_call_span() -> switchyard_lib
     Ok(())
 }
 
+type StreamItems = fn() -> Vec<Result<LlmResponseStreamEvent, LlmClientError>>;
+
+/// Streams the items built by `items` for every call.
+struct FailingStreamClient {
+    items: StreamItems,
+}
+
+#[async_trait]
+impl RoutedLlmClient for FailingStreamClient {
+    async fn call(&self, _request: Request) -> Result<Response, LlmClientError> {
+        Ok(Response {
+            llm_response: LlmResponse::Stream(Box::pin(futures::stream::iter((self.items)()))),
+            metadata: None,
+            upstream_headers: http::HeaderMap::new(),
+        })
+    }
+}
+
+/// Verifies that a failed stream keeps its error class on the client span without free-form text.
+#[tokio::test]
+async fn streaming_client_span_never_records_free_form_error_text() -> switchyard_libsy::Result<()>
+{
+    let _guard = serialize_test().lock().await;
+    let (store, _, _, _, _) = telemetry();
+    let cases: [(&str, StreamItems, &str, &str); 3] = [
+        (
+            "redaction-stream-upstream-http",
+            || {
+                vec![Err(LlmClientError::UpstreamHttp {
+                    status: http::StatusCode::INTERNAL_SERVER_ERROR,
+                    body: LEAKED_CONTENT.to_string(),
+                })]
+            },
+            "500",
+            "upstream HTTP 500",
+        ),
+        (
+            "redaction-stream-decode-error",
+            || {
+                vec![Ok(LlmResponseStreamEvent::new(vec![
+                    LlmResponseChunk::DecodeError {
+                        message: LEAKED_CONTENT.to_string(),
+                    },
+                ]))]
+            },
+            "response_translation",
+            "response decode failed",
+        ),
+        (
+            "redaction-stream-stream-error",
+            || {
+                vec![Ok(LlmResponseStreamEvent::new(vec![
+                    LlmResponseChunk::StreamError {
+                        message: LEAKED_CONTENT.to_string(),
+                    },
+                ]))]
+            },
+            "502",
+            "upstream stream error",
+        ),
+    ];
+    let mut leaks = Vec::new();
+    let mut missing = Vec::new();
+    for (model, items, error_type, error_text) in cases {
+        let client = Arc::new(FailingStreamClient { items }) as Arc<dyn RoutedLlmClient>;
+        let mut request = request_with_metadata("obs-redaction-session", "obs-redaction-corr");
+        request.llm_request.stream = true;
+        let (_, response) = run(algo("obs-redaction-algo", model), client, request).await?;
+        let LlmResponse::Stream(mut stream) = response.llm_response else {
+            return Err(test_error("expected a streamed response"));
+        };
+        while stream.next().await.is_some() {}
+        drop(stream);
+
+        let spans = store.spans();
+        let span = find_span(&spans, "libsy.client_call", "selected_model", model);
+        assert_eq!(
+            span.fields.get("outcome").map(String::as_str),
+            Some("error"),
+            "{model}: {span:?}"
+        );
+        assert_eq!(
+            span.fields.get("error.type").map(String::as_str),
+            Some(error_type),
+            "{model}: {span:?}"
+        );
+        let error = span.fields.get("error").map(String::as_str).unwrap_or("");
+        if !error.contains(error_text) {
+            missing.push(model);
+        }
+        if format!("{span:?}").contains(LEAKED_CONTENT) {
+            leaks.push(model);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "spans lack the expected error text: {missing:?}"
+    );
+    assert!(
+        leaks.is_empty(),
+        "spans leaked free-form error text: {leaks:?}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn failed_call_records_metrics_without_error_details() -> switchyard_libsy::Result<()> {
     let _guard = serialize_test().lock().await;

@@ -278,7 +278,7 @@ impl ClientStreamObserver {
             }
             Err(error) => {
                 let error_type = llm_client_error_type(error);
-                record_client_error(&self.span, &error_type, error);
+                record_client_error(&self.span, &error_type, &redacted_client_error(error));
                 self.outcome = Outcome::Failed;
             }
         }
@@ -296,12 +296,16 @@ impl ClientStreamObserver {
                 record_finish_reasons(&self.span, reason.iter().cloned());
                 self.complete();
             }
-            LlmResponseChunk::DecodeError { message } => {
-                record_client_error(&self.span, "response_translation", message);
+            LlmResponseChunk::DecodeError { .. } => {
+                record_client_error(
+                    &self.span,
+                    "response_translation",
+                    &"response decode failed",
+                );
                 self.outcome = Outcome::Failed;
             }
-            LlmResponseChunk::StreamError { message } => {
-                record_client_error(&self.span, "502", message);
+            LlmResponseChunk::StreamError { .. } => {
+                record_client_error(&self.span, "502", &"upstream stream error");
                 self.outcome = Outcome::Failed;
             }
             _ => {}
@@ -322,6 +326,14 @@ impl Drop for ClientStreamObserver {
         if self.outcome == Outcome::Open {
             self.span.record("outcome", "cancelled");
         }
+    }
+}
+
+/// Loggable text for a stream-time client error: status for upstream HTTP, otherwise the class only.
+fn redacted_client_error(error: &LlmClientError) -> String {
+    match error {
+        LlmClientError::UpstreamHttp { status, .. } => format!("upstream HTTP {status}"),
+        _ => format!("client call failed: {}", llm_client_error_type(error)),
     }
 }
 
