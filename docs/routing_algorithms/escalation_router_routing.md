@@ -57,8 +57,9 @@ Choose the route id deliberately for the surface you want the efficient tier
 to work on, and keep it stable across runs you intend to compare, because
 Switchyard cannot change the client's choice from the server side.
 
-The route-level `prompt` key replaces the packaged trajectory-judge prompt. It
-uses the escalation verdict schema rather than the capability verdict schema.
+The route-level `prompt` key replaces the packaged trajectory-judge prompt;
+`prompt_suffix` appends guidance to it without replacing it. The judge prompt uses
+the escalation verdict schema rather than the capability verdict schema.
 Switchyard supplies that schema according to the route's `response_format_type`:
 through the structured-output request in the default `json_schema` mode, or in
 the prompt in `json_object` mode. The verdict includes an `escalate` decision, a

@@ -436,9 +436,10 @@ mod tests {
     use std::sync::Arc;
 
     use parking_lot::Mutex;
+    use serde_json::json;
     use switchyard_protocol::{
-        ContentBlock, LlmClientError, LlmResponse, LlmResponseChunk, Metadata, ModelId, Request,
-        Response, completion_text, text_request, text_response,
+        ContentBlock, LlmClientError, LlmRequest, LlmResponse, LlmResponseChunk, Metadata, ModelId,
+        Request, Response, ToolCall, ToolResult, completion_text, text_request, text_response,
     };
 
     use super::*;
@@ -654,6 +655,8 @@ mod tests {
     async fn config_overrides_the_packaged_prompt() -> Result<()> {
         let prompts = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&prompts);
+        let judged = Arc::new(Mutex::new(Vec::new()));
+        let recorded_messages = Arc::clone(&judged);
         let serve = move |target: ModelId, request: Request| {
             if target == "judge" {
                 let prompt = request
@@ -667,6 +670,9 @@ mod tests {
                         })
                     });
                 recorded.lock().extend(prompt);
+                recorded_messages
+                    .lock()
+                    .push(format!("{:?}", request.llm_request.messages));
                 std::future::ready(Ok(reply(
                     r#"{"escalate":false,"category":"none","new_evidence":false,"reason":"progressing"}"#,
                 )))
@@ -675,7 +681,9 @@ mod tests {
             }
         };
         let router = Arc::new(LlmTaskClassifier::new(LlmClassifierConfig::Escalation {
-            contract: ClassifierContractConfig::default().with_prompt("Custom trajectory rubric."),
+            contract: ClassifierContractConfig::default()
+                .with_prompt("Custom trajectory rubric.")
+                .with_prompt_suffix("Tool-step rubric."),
             config: EscalationJudgeConfig {
                 confirmations: 1,
                 ..EscalationJudgeConfig::default()
@@ -683,9 +691,53 @@ mod tests {
             max_output_tokens: DEFAULT_JUDGE_MAX_OUTPUT_TOKENS,
         })?);
 
-        test_drive_with_models(router, classify_request(), runtime_models(), serve).await?;
+        let tool_step = Request {
+            llm_request: LlmRequest {
+                messages: vec![
+                    Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::Text {
+                            text: "fix the build".to_string(),
+                        }],
+                    },
+                    Message {
+                        role: Role::Assistant,
+                        content: vec![ContentBlock::ToolCall(ToolCall {
+                            id: "call-1".to_string(),
+                            name: "bash".to_string(),
+                            arguments: json!({"cmd": "cargo build"}),
+                        })],
+                    },
+                    Message {
+                        role: Role::Tool,
+                        content: vec![ContentBlock::ToolResult(ToolResult {
+                            tool_call_id: "call-1".to_string(),
+                            content: vec![ContentBlock::Text {
+                                text: "error[E0432]: unresolved import".to_string(),
+                            }],
+                            is_error: Some(true),
+                        })],
+                    },
+                ],
+                ..text_request(Some("auto".to_string()), "unused")
+            },
+            raw_request: None,
+            metadata: None,
+        };
 
-        assert_eq!(&*prompts.lock(), &["Custom trajectory rubric."]);
+        test_drive_with_models(router, tool_step, runtime_models(), serve).await?;
+
+        assert_eq!(
+            &*prompts.lock(),
+            &["Custom trajectory rubric.\n\nTool-step rubric."]
+        );
+        let judged = judged.lock();
+        assert!(
+            judged
+                .iter()
+                .any(|text| text.contains("error[E0432]: unresolved import")),
+            "judge never saw the tool result: {judged:?}"
+        );
         Ok(())
     }
 

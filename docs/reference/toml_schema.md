@@ -262,6 +262,7 @@ Capability mode classifies before serving. See
 | `message_hash_fallback` | No | `false` | Retains the target against a hash of the first user message when a request carries no session ID. Requires `classify_trigger = "new_session"` or `"user_turn"`. |
 | `recent_turn_window` | No | unset | When unset, the judge sees the opening task and latest user follow-up, when present. When set, it also sees trailing turns. |
 | `prompt` | No | packaged prompt | Replaces the capability prompt. The packaged schema is sent separately as structured-output configuration. |
+| `prompt_suffix` | No | unset | Appended to the packaged or overridden prompt after a blank line. Blank values are ignored. Not allowed in custom mode. |
 
 Escalation mode serves the weak target first and judges the completed turn. See
 [Escalation-Router Routing](../routing_algorithms/escalation_router_routing.md).
@@ -271,6 +272,7 @@ Escalation mode serves the weak target first and judges the completed turn. See
 | `strong_target` | Yes | — | Target used after the session latches. |
 | `weak_target` | Yes | — | Target served before the latch. |
 | `prompt` | No | packaged prompt | Replaces the trajectory-judge prompt. |
+| `prompt_suffix` | No | unset | Appended to the packaged or overridden prompt after a blank line. Blank values are ignored. Not allowed in custom mode. |
 | `escalation.confirmations` | No | `2` | Consecutive fresh-evidence verdicts for the same failure category required to latch. Above `1` needs a stable session ID. |
 | `escalation.recent_turn_window` | No | `28` | Trailing messages shown to the judge. |
 | `escalation.window_message_chars` | No | `500` | Per-message cap inside that window. |
