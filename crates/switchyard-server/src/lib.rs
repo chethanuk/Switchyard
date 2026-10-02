@@ -40,7 +40,9 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use switchyard_llm_client::{AuxiliaryOperation, RunObservation, RunObserver};
-use switchyard_protocol::{LlmClientError, Metadata, ModelId, Request, Usage};
+use switchyard_protocol::{
+    LlmClientError, Metadata, ModelId, Request, Usage, should_forward_upstream_header,
+};
 use switchyard_runner::{
     CallerAuthKind, DecisionTarget, ModelCapabilities, Route, RunOutput, Runner, RunnerError,
 };
@@ -65,28 +67,8 @@ pub const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
 
 const HEADER_SELECTED_MODEL: &str = "x-model-router-selected-model";
-const FORWARDED_UPSTREAM_HEADERS: &[&str] = &[
-    "baggage",
-    "openai-processing-ms",
-    // Anthropic spells its correlation id without the `x-` prefix.
-    "request-id",
-    "traceparent",
-    "tracestate",
-    "x-litellm-response-cost",
-    "x-request-id",
-];
-const FORWARDED_UPSTREAM_HEADER_PREFIXES: &[&str] =
-    &["anthropic-ratelimit-", "x-ratelimit-", "x-upstream-"];
 const MAX_ROUTING_HEADER_VALUE_LEN: usize = 512;
 
-/// Whether an upstream header is safe and useful to expose downstream.
-fn should_forward_upstream_header(name: &HeaderName) -> bool {
-    let name = name.as_str();
-    FORWARDED_UPSTREAM_HEADERS.contains(&name)
-        || FORWARDED_UPSTREAM_HEADER_PREFIXES
-            .iter()
-            .any(|prefix| name.starts_with(prefix))
-}
 /// Non-standard status used only in logs and metrics for a request whose
 /// downstream client disconnected before any response was written.
 const CLIENT_CLOSED_REQUEST: u16 = 499;
@@ -1313,7 +1295,11 @@ fn client_error(error: &LlmClientError) -> Response {
             "upstream_error",
             "temporarily_unavailable",
         ),
-        LlmClientError::UpstreamHttp { status, body } => upstream_error(*status, body),
+        LlmClientError::UpstreamHttp {
+            status,
+            body,
+            headers,
+        } => upstream_error(*status, body, headers),
         LlmClientError::Transport { source } | LlmClientError::InvalidResponse { source } => {
             error_response(
                 StatusCode::BAD_GATEWAY,
@@ -1340,7 +1326,7 @@ fn client_error(error: &LlmClientError) -> Response {
 }
 
 // Keep the provider's message and nonempty string code in our error JSON.
-fn upstream_error(status: StatusCode, body: &str) -> Response {
+fn upstream_error(status: StatusCode, body: &str, headers: &HeaderMap) -> Response {
     let parsed = serde_json::from_str::<Value>(body).unwrap_or_default();
     let error = &parsed["error"];
     let message = error["message"].as_str().unwrap_or(body);
@@ -1348,7 +1334,9 @@ fn upstream_error(status: StatusCode, body: &str) -> Response {
         .as_str()
         .filter(|code| !code.is_empty())
         .unwrap_or("upstream_error");
-    let mut response = error_response(status, message, "upstream_error", code);
+    let mut response = ApiError::new(status, message, "upstream_error", code)
+        .with_headers(headers.clone())
+        .into_response(WireFormat::OpenAiChat);
     // Provider messages and codes can quote request content; log only fixed metadata.
     response
         .extensions_mut()
@@ -1363,6 +1351,8 @@ struct ApiError {
     message: String,
     error_type: &'static str,
     code: String,
+    // Upstream headers, carried on this error through the per-endpoint re-render.
+    headers: HeaderMap,
 }
 
 impl ApiError {
@@ -1377,7 +1367,13 @@ impl ApiError {
             message: message.into(),
             error_type,
             code: code.into(),
+            headers: HeaderMap::new(),
         }
+    }
+
+    fn with_headers(mut self, headers: HeaderMap) -> Self {
+        self.headers = headers;
+        self
     }
 
     fn into_response(self, wire_format: WireFormat) -> Response {
@@ -1398,6 +1394,9 @@ impl ApiError {
             }),
         };
         let mut response = (self.status, Json(body)).into_response();
+        for (name, value) in &self.headers {
+            response.headers_mut().append(name.clone(), value.clone());
+        }
         response
             .extensions_mut()
             .insert(RequestLogError(self.message.clone()));
@@ -2014,6 +2013,7 @@ mod tests {
             body: format!(
                 r#"{{"error":{{"message":"validation failed: {LEAKED}","code":"invalid_request_{LEAKED}"}}}}"#
             ),
+            headers: Box::default(),
         };
         for wire_format in [
             WireFormat::OpenAiChat,

@@ -69,6 +69,12 @@ impl MockUpstream {
             )
             .route("/v1/responses/compact", post(upstream_responses_auxiliary))
             .route("/future/provider/endpoint", post(upstream_fallback))
+            .route(
+                "/err/{scenario}/v1/chat/completions",
+                post(upstream_scripted),
+            )
+            .route("/err/{scenario}/v1/messages", post(upstream_scripted))
+            .route("/err/{scenario}/v1/responses", post(upstream_scripted))
             .layer(DefaultBodyLimit::disable())
             .with_state(Arc::clone(&calls));
         let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -737,6 +743,79 @@ async fn upstream_fallback(
         "x-end-to-end-response",
         HeaderValue::from_static("preserve"),
     );
+    response
+}
+
+/// Scripted upstream for the routed-error-header contract. The `scenario` path
+/// segment picks the reply; `retry` answers per attempt (first, then second).
+async fn upstream_scripted(
+    State(calls): State<Arc<Mutex<Vec<Value>>>>,
+    Path(scenario): Path<String>,
+    Json(body): Json<Value>,
+) -> HttpResponse {
+    let attempt = {
+        let mut calls = calls.lock().await;
+        let attempt = calls
+            .iter()
+            .filter(|call| call["scenario"] == scenario.as_str())
+            .count();
+        calls.push(json!({"scenario": scenario, "model": body["model"]}));
+        attempt
+    };
+    let rate_limit_headers = [
+        ("retry-after", "15"),
+        ("x-ratelimit-reset-requests", "15s"),
+        ("anthropic-ratelimit-requests-reset", "2026-01-01T00:00:15Z"),
+        ("x-request-id", "req_test_1"),
+        ("request-id", "req_test_1"),
+        ("set-cookie", "session=upstream; HttpOnly"),
+        ("www-authenticate", "Bearer realm=\"upstream\""),
+    ];
+    let (status, headers): (StatusCode, Vec<(&str, &str)>) = match (scenario.as_str(), attempt) {
+        ("ok", _) => {
+            return (
+                rate_limit_headers,
+                Json(json!({
+                    "id": "chatcmpl-test", "object": "chat.completion", "model": body["model"],
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                                 "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                })),
+            )
+                .into_response();
+        }
+        ("429", _) => (StatusCode::TOO_MANY_REQUESTS, rate_limit_headers.to_vec()),
+        ("503", _) => (StatusCode::SERVICE_UNAVAILABLE, rate_limit_headers.to_vec()),
+        ("bare429", _) => (StatusCode::TOO_MANY_REQUESTS, vec![]),
+        ("hostile429", _) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            vec![
+                ("authorization", "Bearer upstream-secret"),
+                ("proxy-authenticate", "Basic"),
+                ("x-custom", "nope"),
+            ],
+        ),
+        ("retry", 0) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            vec![("retry-after", "0"), ("x-request-id", "first")],
+        ),
+        ("retry", _) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            vec![("x-request-id", "second")],
+        ),
+        ("cand-a", _) => (StatusCode::TOO_MANY_REQUESTS, vec![("x-request-id", "a")]),
+        _ => (StatusCode::SERVICE_UNAVAILABLE, vec![("x-request-id", "b")]),
+    };
+    let mut response = (
+        status,
+        Json(json!({"error": {"message": "scripted upstream failure"}})),
+    )
+        .into_response();
+    for (name, value) in headers {
+        response
+            .headers_mut()
+            .append(name, HeaderValue::from_static(value));
+    }
     response
 }
 
@@ -5251,5 +5330,233 @@ async fn upstream_headers_forward_on_streaming_responses() -> TestResult {
             .and_then(|value| value.to_str().ok()),
         Some("model/a")
     );
+    Ok(())
+}
+
+/// A terminal upstream 429/503 reaches the client with the final failed
+/// attempt's allowlisted retry and correlation headers, on every wire format,
+/// while status, body, and non-allowlisted headers stay as they were.
+#[tokio::test]
+async fn routed_upstream_error_forwards_final_attempt_headers() -> TestResult {
+    struct Row {
+        name: &'static str,
+        format: &'static str,
+        path: &'static str,
+        scenarios: &'static [&'static str],
+        max_retries: u32,
+        status: StatusCode,
+        present: &'static [(&'static str, &'static str)],
+        absent: &'static [&'static str],
+    }
+    const SECRETS: &[&str] = &["set-cookie", "www-authenticate", "authorization"];
+    const CHAT: &str = "/v1/chat/completions";
+    const MESSAGES: &str = "/v1/messages";
+    const RESPONSES: &str = "/v1/responses";
+    let rows = [
+        Row {
+            name: "openai_chat 200 control",
+            format: "openai_chat",
+            path: CHAT,
+            scenarios: &["ok"],
+            max_retries: 0,
+            status: StatusCode::OK,
+            present: &[
+                ("x-ratelimit-reset-requests", "15s"),
+                ("x-request-id", "req_test_1"),
+            ],
+            absent: SECRETS,
+        },
+        Row {
+            name: "openai_chat 429",
+            format: "openai_chat",
+            path: CHAT,
+            scenarios: &["429"],
+            max_retries: 0,
+            status: StatusCode::TOO_MANY_REQUESTS,
+            present: &[
+                ("retry-after", "15"),
+                ("x-ratelimit-reset-requests", "15s"),
+                ("x-request-id", "req_test_1"),
+            ],
+            absent: SECRETS,
+        },
+        Row {
+            name: "openai_chat 503",
+            format: "openai_chat",
+            path: CHAT,
+            scenarios: &["503"],
+            max_retries: 0,
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            present: &[
+                ("retry-after", "15"),
+                ("x-ratelimit-reset-requests", "15s"),
+                ("x-request-id", "req_test_1"),
+            ],
+            absent: SECRETS,
+        },
+        Row {
+            name: "anthropic_messages 429",
+            format: "anthropic_messages",
+            path: MESSAGES,
+            scenarios: &["429"],
+            max_retries: 0,
+            status: StatusCode::TOO_MANY_REQUESTS,
+            present: &[
+                ("retry-after", "15"),
+                ("anthropic-ratelimit-requests-reset", "2026-01-01T00:00:15Z"),
+                ("request-id", "req_test_1"),
+            ],
+            absent: SECRETS,
+        },
+        Row {
+            name: "anthropic_messages 503",
+            format: "anthropic_messages",
+            path: MESSAGES,
+            scenarios: &["503"],
+            max_retries: 0,
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            present: &[
+                ("retry-after", "15"),
+                ("anthropic-ratelimit-requests-reset", "2026-01-01T00:00:15Z"),
+                ("request-id", "req_test_1"),
+            ],
+            absent: SECRETS,
+        },
+        Row {
+            name: "openai_responses 429",
+            format: "openai_responses",
+            path: RESPONSES,
+            scenarios: &["429"],
+            max_retries: 0,
+            status: StatusCode::TOO_MANY_REQUESTS,
+            present: &[
+                ("retry-after", "15"),
+                ("x-ratelimit-reset-requests", "15s"),
+                ("x-request-id", "req_test_1"),
+            ],
+            absent: SECRETS,
+        },
+        Row {
+            name: "openai_responses 503",
+            format: "openai_responses",
+            path: RESPONSES,
+            scenarios: &["503"],
+            max_retries: 0,
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            present: &[
+                ("retry-after", "15"),
+                ("x-ratelimit-reset-requests", "15s"),
+                ("x-request-id", "req_test_1"),
+            ],
+            absent: SECRETS,
+        },
+        Row {
+            name: "retry: only the final attempt's headers",
+            format: "openai_chat",
+            path: CHAT,
+            scenarios: &["retry"],
+            max_retries: 1,
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            present: &[("x-request-id", "second")],
+            absent: &["retry-after"],
+        },
+        Row {
+            name: "candidate fallback: only the last candidate's headers",
+            format: "openai_chat",
+            path: CHAT,
+            scenarios: &["cand-a", "cand-b"],
+            max_retries: 0,
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            present: &[("x-request-id", "b")],
+            absent: &[],
+        },
+        Row {
+            name: "non-allowlisted headers are dropped",
+            format: "openai_chat",
+            path: CHAT,
+            scenarios: &["hostile429"],
+            max_retries: 0,
+            status: StatusCode::TOO_MANY_REQUESTS,
+            present: &[],
+            absent: &["authorization", "proxy-authenticate", "x-custom"],
+        },
+        Row {
+            name: "no upstream headers means none added",
+            format: "openai_chat",
+            path: CHAT,
+            scenarios: &["bare429"],
+            max_retries: 0,
+            status: StatusCode::TOO_MANY_REQUESTS,
+            present: &[],
+            absent: &["retry-after", "x-request-id", "x-ratelimit-reset-requests"],
+        },
+    ];
+
+    for row in rows {
+        let upstream = MockUpstream::start().await?;
+        let origin = upstream.base_url.trim_end_matches("/v1");
+        let mut clients = String::new();
+        let mut targets = String::new();
+        for (index, scenario) in row.scenarios.iter().enumerate() {
+            clients.push_str(&format!(
+                "[llm_clients.c{index}]\nformat = \"{format}\"\nbase_url = \"{origin}/err/{scenario}/v1\"\nmax_retries = {retries}\nfailure_cooldown_ms = 0\n\n",
+                format = row.format,
+                retries = row.max_retries,
+            ));
+            targets.push_str(&format!(
+                "t{index} = {{ id = \"model/t{index}\", llm_client = \"c{index}\" }}\n"
+            ));
+        }
+        let route = if row.scenarios.len() == 1 {
+            "type = \"passthrough\"\ntarget = \"t0\"".to_string()
+        } else {
+            "type = \"random\"\ntargets = [\"t0\", \"t1\"]\nweights = [1000, 1]\nseed = 17"
+                .to_string()
+        };
+        let app = build_switchyard_router(load_test_config(&format!(
+            "schema_version = 1\n\n{clients}[targets]\n{targets}\n[routes.r]\nid = \"{ROUTE_MODEL}\"\n{route}\n"
+        ))?);
+        let body = if row.path == MESSAGES {
+            json!({"model": ROUTE_MODEL, "max_tokens": 16,
+                   "messages": [{"role": "user", "content": "hello"}]})
+        } else if row.path == RESPONSES {
+            json!({"model": ROUTE_MODEL, "input": "hello"})
+        } else {
+            json!({"model": ROUTE_MODEL, "messages": [{"role": "user", "content": "hello"}]})
+        };
+        let response = send(&app, "POST", row.path, Some(body)).await?;
+
+        assert_eq!(response.status, row.status, "{}", row.name);
+        if row.status != StatusCode::OK {
+            let json = response.json()?;
+            let message = if row.path == MESSAGES {
+                assert_eq!(json["type"], "error", "{}", row.name);
+                json["error"]["message"].as_str()
+            } else {
+                json["error"]["message"].as_str()
+            };
+            assert!(
+                message.is_some_and(|m| m.contains("scripted upstream failure")),
+                "{}: unexpected body {json}",
+                row.name
+            );
+        }
+        for (name, value) in row.present {
+            let values = response
+                .headers
+                .get_all(*name)
+                .iter()
+                .map(|v| v.to_str())
+                .collect::<Result<Vec<_>, _>>()?;
+            assert_eq!(values, [*value], "{}: header {name}", row.name);
+        }
+        for name in row.absent {
+            assert!(
+                !response.headers.contains_key(*name),
+                "{}: {name} must not be forwarded",
+                row.name
+            );
+        }
+    }
     Ok(())
 }
