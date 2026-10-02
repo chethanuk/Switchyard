@@ -32,6 +32,9 @@ See the
   exporter, or compatible encoder assets are supplied. CRAFT task generation
   is added under `experimental/`, separately from the routing runtime.
   (#539, #593, #616, #572)
+- **Gemini `generateContent` translation** — requests and buffered responses
+  translate to and from Gemini under the `gemini_generate_content` format key.
+  Streaming is not supported yet.
 - **`timeout_ms` on `[llm_clients.<name>]`** — one deadline covers all attempts,
   retry delays, and the complete response, including stream reads. Unset leaves
   the wait unbounded; `0` is rejected. A timeout returns `504` without trying another
