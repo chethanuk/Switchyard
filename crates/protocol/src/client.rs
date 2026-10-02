@@ -16,6 +16,46 @@ use crate::{ModelId, Request, Response};
 /// A boxed client-specific error preserved as the source of a routed call failure.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
+const FORWARDED_UPSTREAM_HEADERS: &[&str] = &[
+    "baggage",
+    "openai-processing-ms",
+    // Anthropic spells its correlation id without the `x-` prefix.
+    "request-id",
+    "traceparent",
+    "tracestate",
+    "x-litellm-response-cost",
+    "x-request-id",
+];
+const FORWARDED_UPSTREAM_HEADER_PREFIXES: &[&str] =
+    &["anthropic-ratelimit-", "x-ratelimit-", "x-upstream-"];
+
+/// Whether an upstream header is safe and useful to expose downstream.
+pub fn should_forward_upstream_header(name: &http::HeaderName) -> bool {
+    let name = name.as_str();
+    FORWARDED_UPSTREAM_HEADERS.contains(&name)
+        || FORWARDED_UPSTREAM_HEADER_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
+
+/// Copy the forwardable subset of `headers`. `retry_after` is admitted only for
+/// error responses, where it tells the caller when to retry; success responses
+/// keep the plain allowlist.
+pub fn forwardable_upstream_headers(
+    headers: &http::HeaderMap,
+    retry_after: bool,
+) -> http::HeaderMap {
+    let mut out = http::HeaderMap::new();
+    for (name, value) in headers {
+        if should_forward_upstream_header(name)
+            || (retry_after && name == http::header::RETRY_AFTER)
+        {
+            out.append(name.clone(), value.clone());
+        }
+    }
+    out
+}
+
 /// Failures a routed LLM client can surface to its caller.
 ///
 /// The variants classify failures that routing hosts commonly need to handle,
@@ -99,6 +139,9 @@ pub enum LlmClientError {
         status: http::StatusCode,
         /// Raw upstream error body.
         body: String,
+        /// Allowlisted headers from the final failed attempt (see [`forwardable_upstream_headers`]).
+        /// Boxed to keep `LlmClientError` small (`clippy::result_large_err`).
+        headers: Box<http::HeaderMap>,
     },
 
     /// The upstream returned a response the client could not decode.

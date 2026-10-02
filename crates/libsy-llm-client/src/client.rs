@@ -17,7 +17,7 @@ use reqwest::header::{HeaderMap, RETRY_AFTER};
 use serde_json::{Map, Value, json};
 use switchyard_protocol::{
     LlmRequest, LlmResponse, LlmResponseChunk, LlmResponseStream, LlmResponseStreamEvent, Metadata,
-    ModelId, Request, Response, RoutedLlmClient,
+    ModelId, Request, Response, RoutedLlmClient, forwardable_upstream_headers,
 };
 use switchyard_translation::{
     TranslationError, WireFormat, decode_aggregated_response, decode_request, decode_stream,
@@ -501,6 +501,8 @@ impl TranslatingLlmClient {
         }
 
         let retry_after = retry_after_delay(response.headers());
+        // Only the final failed attempt's error reaches the caller, so these are its headers.
+        let headers = Box::new(forwardable_upstream_headers(response.headers(), true));
         let body = match response.text().await {
             Ok(body) => body,
             Err(error) => {
@@ -521,7 +523,11 @@ impl TranslatingLlmClient {
                     message: body,
                 }
             } else {
-                LlmClientError::UpstreamHttp { status, body }
+                LlmClientError::UpstreamHttp {
+                    status,
+                    body,
+                    headers,
+                }
             };
         Err(AttemptFailure {
             error,
@@ -610,6 +616,7 @@ impl TranslatingLlmClient {
                                         metadata.as_ref(),
                                         backend.is_forwarding_auth(),
                                     ),
+                                    headers: Box::default(),
                                 }
                             }
                             error => LlmClientError::ResponseTranslation(error.to_string()),
@@ -2433,7 +2440,8 @@ mod tests {
             error,
             LlmClientError::UpstreamHttp {
                 status: StatusCode::UNAUTHORIZED,
-                body
+                body,
+                ..
             } if body == "invalid key"
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -2514,7 +2522,8 @@ mod tests {
             error,
             LlmClientError::UpstreamHttp {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
-                body
+                body,
+                ..
             } if body == "attempt 3"
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 3);
@@ -2624,6 +2633,7 @@ mod tests {
                 error: LlmClientError::UpstreamHttp {
                     status,
                     body: String::new(),
+                    headers: Box::default(),
                 },
                 status: Some(status),
                 retry_after: None,
@@ -2641,6 +2651,7 @@ mod tests {
                 error: LlmClientError::UpstreamHttp {
                     status,
                     body: String::new(),
+                    headers: Box::default(),
                 },
                 status: Some(status),
                 retry_after: None,
@@ -2768,6 +2779,7 @@ mod tests {
         let LlmClientError::UpstreamHttp {
             status,
             body: actual,
+            ..
         } = error
         else {
             panic!("expected the upstream HTTP error, got {error:?}");
