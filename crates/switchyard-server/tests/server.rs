@@ -140,6 +140,17 @@ async fn upstream_chat(
     }
 
     let model = body["model"].as_str().unwrap_or("unknown").to_string();
+    if model == "model/rate-limited" {
+        return (
+            if prompt == "unavailable" {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            },
+            Json(json!({"error": {"message": "quota exhausted", "code": "usage_limit"}})),
+        )
+            .into_response();
+    }
     if model == "model/classifier" {
         let mut pending = HashSet::new();
         for message in body["messages"].as_array().into_iter().flatten() {
@@ -338,6 +349,23 @@ async fn upstream_chat(
                 "finish_reason": "stop"
             }],
             "usage": {"prompt_tokens": 40, "completion_tokens": 4, "total_tokens": 44}
+        }))
+        .into_response();
+    }
+
+    // A generation that did not complete (`abort` from vLLM or SGLang, `error` from OpenRouter,
+    // `repetition` from vLLM).
+    if let Some(reason @ ("abort" | "error" | "repetition")) = model.strip_prefix("model/finish-") {
+        return Json(json!({
+            "id": "chatcmpl-finish",
+            "object": "chat.completion",
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "partial"},
+                "finish_reason": reason
+            }],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}
         }))
         .into_response();
     }
@@ -1138,6 +1166,85 @@ async fn failed_responses_return_errors_and_try_fallback_across_endpoints() -> T
     let stats = send(&app, "GET", "/v1/stats", None).await?.json()?;
     assert_eq!(stats["models"]["model/failed"]["errors"], requests.len());
     assert_eq!(stats["models"]["model/fallback"]["calls"], requests.len());
+    Ok(())
+}
+
+// A Chat backend that ends a generation with `abort`, `error` or `repetition` did
+// not complete it: every client path gets a 502, and a fallback route moves on.
+#[tokio::test]
+async fn chat_failed_finish_reasons_return_errors_and_try_fallback() -> TestResult {
+    let upstream = MockUpstream::start().await?;
+    let requests = [
+        (
+            "/v1/chat/completions",
+            json!({
+                "model": ROUTE_MODEL, "messages": [{"role": "user", "content": "hello"}]
+            }),
+        ),
+        (
+            "/v1/messages",
+            json!({
+                "model": ROUTE_MODEL, "max_tokens": 16,
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+        ),
+        (
+            "/v1/responses",
+            json!({"model": ROUTE_MODEL, "input": "hello"}),
+        ),
+    ];
+    for reason in ["abort", "error", "repetition"] {
+        let model = format!("model/finish-{reason}");
+        let message = format!("provider finished with finish_reason \"{reason}\"");
+        for fallback in [false, true] {
+            let route = if fallback {
+                "type = \"random\"\ntargets = [\"first\", \"second\"]\nweights = [1000, 1]\nseed = 17"
+            } else {
+                "type = \"passthrough\"\ntarget = \"first\""
+            };
+            let app = build_switchyard_router(load_test_config(&format!(
+                r#"
+schema_version = 1
+[llm_clients.mock]
+format = "openai_chat"
+base_url = "{base_url}"
+max_retries = 0
+[targets]
+first = {{ id = "{model}", llm_client = "mock" }}
+second = {{ id = "model/fallback", llm_client = "mock" }}
+[routes.chat]
+id = "{ROUTE_MODEL}"
+{route}
+"#,
+                base_url = upstream.base_url,
+            ))?);
+            for (path, body) in &requests {
+                let previous_calls = upstream.models().await.len();
+                let response = send(&app, "POST", path, Some(body.clone())).await?;
+                let calls = upstream.models().await[previous_calls..].to_vec();
+                if fallback {
+                    assert_eq!(response.status, StatusCode::OK, "{model}: {path}");
+                    assert_eq!(
+                        response.json()?["model"],
+                        "model/fallback",
+                        "{model}: {path}"
+                    );
+                    assert_eq!(calls, [model.as_str(), "model/fallback"], "{model}: {path}");
+                    continue;
+                }
+                assert_eq!(response.status, StatusCode::BAD_GATEWAY, "{model}: {path}");
+                let expected = if *path == "/v1/messages" {
+                    json!({"type": "error", "error": {"type": "api_error", "message": message}})
+                } else {
+                    json!({"error": {
+                        "type": "upstream_error", "code": "upstream_error", "message": message
+                    }})
+                };
+                assert_eq!(response.json()?, expected, "{model}: {path}");
+                assert_eq!(calls, [model.as_str()], "{model}: {path}");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -3283,6 +3390,102 @@ target = "openai"
     Ok(())
 }
 
+/// Serves `/v1/responses` and `/v1/messages` for a stub gateway on one host and records the
+/// path and `authorization` values of each call. `/v1/responses` calls get a judge verdict.
+async fn upstream_gateway_records_auth(
+    State(calls): State<Arc<Mutex<Vec<Value>>>>,
+    uri: Uri,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> HttpResponse {
+    let authorization: Vec<_> = headers
+        .get_all("authorization")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect();
+    calls
+        .lock()
+        .await
+        .push(json!({"path": uri.path(), "authorization": authorization}));
+    let model = body["model"].as_str().unwrap_or_default();
+    if uri.path() == "/v1/responses" {
+        let verdict = json!({
+            "crux": "bounded task", "primary_rule": "SUP-1",
+            "capability_boundary": "supported", "p_solve": 0.9,
+        });
+        return Json(responses_body("resp_judge", model, &verdict.to_string())).into_response();
+    }
+    Json(json!({
+        "id": "msg_gateway", "type": "message", "role": "assistant", "model": model,
+        "content": [{"type": "text", "text": "ok"}],
+        "stop_reason": "end_turn", "stop_sequence": null,
+        "usage": {"input_tokens": 1, "output_tokens": 1}
+    }))
+    .into_response()
+}
+
+/// A route that mixes formats on one gateway forwards the caller's bearer token to both of the
+/// gateway's APIs: `/v1/responses` for the judge and `/v1/messages` for the answer.
+#[tokio::test]
+async fn route_on_one_host_forwards_the_bearer_token_to_responses_and_messages() -> TestResult {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let gateway = Router::new()
+        .route("/v1/responses", post(upstream_gateway_records_auth))
+        .route("/v1/messages", post(upstream_gateway_records_auth))
+        .with_state(Arc::clone(&calls));
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let host = format!("http://{}", listener.local_addr()?);
+    tokio::spawn(async move { axum::serve(listener, gateway).await });
+    let state = load_test_config(&format!(
+        r#"
+schema_version = 1
+
+[llm_clients.gateway_responses]
+format = "openai_responses"
+base_url = "{host}/v1"
+forward_auth = true
+max_retries = 0
+
+[llm_clients.gateway_messages]
+format = "anthropic_messages"
+base_url = "{host}"
+forward_auth = true
+max_retries = 0
+
+[targets]
+judge = {{ id = "model/judge", llm_client = "gateway_responses" }}
+capable = {{ id = "model/capable", llm_client = "gateway_messages" }}
+efficient = {{ id = "model/efficient", llm_client = "gateway_messages" }}
+
+[routes.agent]
+id = "switchyard/agent"
+type = "composite"
+classifier = {{ target = "judge", base_threshold = 0.5, classify_trigger = "user_turn" }}
+stage = {{ capable_target = "capable", efficient_target = "efficient", confidence_threshold = 0.5 }}
+"#
+    ))?;
+
+    let response = send_with_headers(
+        &build_switchyard_router(state),
+        "POST",
+        "/v1/responses",
+        Some(json!({"model": "switchyard/agent", "input": "hi there"})),
+        &[("authorization", "Bearer gateway-key")],
+    )
+    .await?;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.text()?);
+
+    // The judge call and the answer call each carry the caller's bearer token once, unchanged.
+    assert_eq!(
+        *calls.lock().await,
+        [
+            json!({"path": "/v1/responses", "authorization": ["Bearer gateway-key"]}),
+            json!({"path": "/v1/messages", "authorization": ["Bearer gateway-key"]}),
+        ]
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn routes_dispatch_and_discovery_endpoints_are_stable() -> TestResult {
     let (upstream, app) = test_app(&[
@@ -3944,6 +4147,7 @@ async fn routing_log_prefers_canonical_and_preserves_legacy_fallback() -> TestRe
         .uri("/v1/chat/completions")
         .header("content-type", "application/json")
         .header("x-switchyard-session-id", "canonical-session")
+        .header("x-switchyard-turn-id", "canonical-turn")
         .header("proxy_x_session_id", "legacy-session")
         .header("x-switchyard-origin", r#"custom-agent/"quoted"\path"#)
         .body(Body::from(serde_json::to_vec(&json!({
@@ -4003,8 +4207,10 @@ async fn routing_log_prefers_canonical_and_preserves_legacy_fallback() -> TestRe
     let first: Value =
         serde_json::from_str(records.lines().next().ok_or("routing log was empty")?)?;
     assert_eq!(first["session_id"], "canonical-session");
+    assert_eq!(first["turn_id"], "canonical-turn");
     assert_eq!(first["origin"], r#"custom-agent/"quoted"\path"#);
     let second: Value = serde_json::from_str(records.lines().nth(1).ok_or("missing record")?)?;
+    assert_eq!(second["turn_id"], Value::Null);
     assert_eq!(second.get("origin"), Some(&Value::Null));
     assert!(
         first["ts"]
@@ -4112,6 +4318,7 @@ async fn routing_log_keeps_the_canonical_session_id_until_a_stream_drains() -> T
         })),
         &[
             ("x-switchyard-session-id", "streaming-session"),
+            ("x-switchyard-turn-id", "streaming-turn"),
             ("x-switchyard-origin", "codex-cli"),
         ],
     )
@@ -4136,6 +4343,7 @@ async fn routing_log_keeps_the_canonical_session_id_until_a_stream_drains() -> T
 
     let record: Value = serde_json::from_str(&std::fs::read_to_string(log_path)?)?;
     assert_eq!(record["route_id"], ROUTE_MODEL);
+    assert_eq!(record["turn_id"], "streaming-turn");
     assert_eq!(record["algorithm"], "random");
     assert_eq!(record["origin"], "codex-cli");
     Ok(())
@@ -5251,5 +5459,80 @@ async fn upstream_headers_forward_on_streaming_responses() -> TestResult {
             .and_then(|value| value.to_str().ok()),
         Some("model/a")
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn rate_limit_fallback_policy() -> TestResult {
+    for (policy, forward_auth, prompt, is_terminal) in [
+        ("", false, "hello", false),
+        ("", true, "hello", false),
+        ("fallback_on_rate_limit = true", false, "hello", false),
+        ("fallback_on_rate_limit = false", false, "hello", true),
+        ("fallback_on_rate_limit = false", true, "hello", true),
+        (
+            "fallback_on_rate_limit = false",
+            false,
+            "unavailable",
+            false,
+        ),
+    ] {
+        let upstream = MockUpstream::start().await?;
+        let app = build_switchyard_router(load_test_config(&format!(
+            r#"
+schema_version = 1
+[llm_clients.primary]
+format = "openai_chat"
+base_url = "{base_url}"
+forward_auth = {forward_auth}
+{policy}
+max_retries = 1
+failure_cooldown_ms = 60000
+[llm_clients.secondary]
+format = "openai_chat"
+base_url = "{base_url}"
+[targets]
+first = {{ id = "model/rate-limited", llm_client = "primary" }}
+second = {{ id = "model/fallback", llm_client = "secondary" }}
+[routes.test]
+id = "{ROUTE_MODEL}"
+type = "random"
+targets = ["first", "second"]
+weights = [1000, 1]
+seed = 17
+"#,
+            base_url = upstream.base_url,
+        ))?);
+        let mut expected_calls = Vec::new();
+        // The second request exercises cooldown as well as streaming HTTP errors.
+        for stream in [false, true] {
+            let response = send_with_headers(
+                &app,
+                "POST",
+                "/v1/chat/completions",
+                Some(json!({
+                    "model": ROUTE_MODEL, "stream": stream,
+                    "messages": [{"role": "user", "content": prompt}]
+                })),
+                &[("authorization", "Bearer test-caller")],
+            )
+            .await?;
+            if !stream || is_terminal || forward_auth {
+                expected_calls.extend(["model/rate-limited"; 2]);
+            }
+            if is_terminal {
+                assert_eq!(response.status, StatusCode::TOO_MANY_REQUESTS);
+                assert_eq!(response.json()?["error"]["code"], "usage_limit");
+            } else {
+                assert_eq!(response.status, StatusCode::OK);
+                expected_calls.push("model/fallback");
+            }
+            assert_eq!(
+                upstream.models().await,
+                expected_calls,
+                "{policy}, forward_auth={forward_auth}, {prompt}, stream={stream}"
+            );
+        }
+    }
     Ok(())
 }

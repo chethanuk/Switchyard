@@ -109,10 +109,17 @@ A client can set `forward_auth = true` instead of `api_key_env` to send each
 caller's credential to that upstream. OpenAI clients forward `authorization`,
 `chatgpt-account-id`, and `x-openai-fedramp`. Anthropic clients forward
 `authorization` or `x-api-key`. Enable this only for an upstream that should
-receive the caller's login. All backends reachable through the route, including
-efficient and capable targets, must use the same provider. Other application
-headers are preserved, so they may contain provider-specific credentials. The
-server rejects a forwarding route called through the other provider's API.
+receive the caller's login. Other application headers are preserved, so they
+may contain provider-specific credentials. The forwarding clients in a route,
+including efficient and capable targets, must use one credential family: all
+OpenAI formats or all `anthropic_messages`. The exception is one host that
+serves both formats, such as an LLM gateway that accepts each caller's gateway
+key on every endpoint: a route may mix the two families when all of its
+forwarding clients use the same scheme, host, and port. Such a route serves
+Chat Completions and Responses callers and forwards the caller's bearer token
+to every forwarding client. The server returns 400 to a caller whose API the
+route does not serve. Clients that use `api_key_env` send the server's own key,
+so these limits do not apply to them.
 
 ### Run the server
 
@@ -192,6 +199,10 @@ Use this path when you want routing inside your own Rust application rather than
 behind a proxy. `switchyard-libsy` never calls a model itself: an algorithm
 picks a target and hands the model call back to you.
 
+For plan/execute, supply conversation history, including tool calls and results,
+before routing. Responses API continuation IDs alone are not enough. See the
+[Responses API history requirement](routing_algorithms/plan_execute_routing.md#responses-api-history-requirement).
+
 ### Add the dependencies
 
 ```toml
@@ -224,6 +235,42 @@ judge call your host performs over its own transport. The run ends with `Step::D
 response when routing already produced the answer. Otherwise the host makes the terminal answer
 call from that outcome. Serving these calls yourself is what lets libsy embed in a host that
 already owns its HTTP stack, retries, and credentials.
+
+Pass each call's work to `respond` before awaiting it. In Rust:
+
+```rust
+use switchyard_libsy::{CallModel, LibsyError, Result};
+use switchyard_protocol::RoutedLlmClient;
+
+async fn serve(call: CallModel, client: &dyn RoutedLlmClient) -> Result<()> {
+    let request = call.request.clone();
+    let model = call.models[0].clone();
+    call.respond(async move {
+        client.call(request).await.map_err(|error| LibsyError::client_call(model, error))
+    }).await
+}
+```
+
+In Python, the client coroutine returns `LlmResponse.Agg` or `LlmResponse.Stream`:
+
+```python
+await call.respond(client.call(call.request, call.models[0]))
+```
+
+`respond` now accepts a future or awaitable instead of a completed response. Move
+the provider await into this method. Python `call.fail(error)` is also awaitable.
+Decision calls use the same pattern with their existing decision response type.
+
+When an algorithm stops waiting for a call, `respond` cancels that work and
+returns normally. Python waits for task cleanup before returning. For concurrent
+algorithms, schedule each Python handler with `asyncio.create_task` and cancel and
+await remaining handlers when the run ends; see the complete
+[Python example](../examples/libsy.py). Awaiting handlers one at a time inside the
+step loop serializes their execution. Rust hosts can use `libsy::drive` to manage
+concurrent handlers and their lifetime.
+
+After a response stream is delivered, its consumer controls its lifetime.
+Cancellation cannot guarantee that an upstream provider stops generating or billing.
 
 Successful runs also include `OutcomeMetadata`: a unique `outcome_id`, the algorithm
 name, and optional JSON evidence. In Python, read `outcome.metadata.outcome_id`,

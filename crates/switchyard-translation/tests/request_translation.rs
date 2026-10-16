@@ -17,6 +17,45 @@ use common::{REASONING_MODEL, normalized_policy, shell_tool_call};
 type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[test]
+fn openai_chat_rejects_mcp_history_before_text_only_returns() {
+    use switchyard_translation::{LlmRequest, McpContent, Message, Role};
+
+    let engine = TranslationEngine::default();
+    for role in [Role::User, Role::Assistant] {
+        let request = LlmRequest {
+            messages: vec![Message {
+                role,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "Keep this text".into(),
+                    },
+                    ContentBlock::Mcp(McpContent::Listing {
+                        server_name: "inventory".into(),
+                        id: None,
+                        tools: Vec::new(),
+                        error: None,
+                    }),
+                ],
+            }],
+            ..LlmRequest::default()
+        };
+        for lossy_conversion_policy in [
+            LossyConversionPolicy::AllowWithDiagnostics,
+            LossyConversionPolicy::Reject,
+        ] {
+            let policy = TranslationPolicy {
+                lossy_conversion_policy,
+                ..TranslationPolicy::default()
+            };
+            assert!(matches!(
+                engine.encode_request(WireFormat::OpenAiChat, &request, &policy),
+                Err(TranslationError::LossyConversion(_))
+            ));
+        }
+    }
+}
+
+#[test]
 fn responses_allowed_tools_is_translated_or_rejected() -> TestResult {
     let engine = TranslationEngine::default();
     for mode in ["auto", "required"] {
@@ -482,6 +521,65 @@ fn anthropic_thinking_to_responses_uses_normalized_effort() -> TestResult {
         assert_eq!(output.body.get("reasoning"), expected.as_ref());
     }
     Ok(())
+}
+
+#[test]
+fn anthropic_reconstruction_preserves_fallback_credit_token() -> TestResult {
+    let engine = TranslationEngine::default();
+    for token in [
+        json!("example-token-from-refusal"),
+        json!({"token": "example-token-from-refusal"}),
+        json!({"token": "example-token-from-refusal", "mode": "strict"}),
+        json!({"token": "example-token-from-refusal", "mode": "best_effort"}),
+    ] {
+        let body = json!({
+            "model": "claude-opus-4-8",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Review this code for security flaws."}],
+            "fallback_credit_token": token
+        });
+        for policy in [TranslationPolicy::default(), normalized_policy()] {
+            let output = engine.translate_request(
+                WireFormat::AnthropicMessages,
+                WireFormat::AnthropicMessages,
+                &body,
+                &policy,
+            )?;
+            assert_eq!(
+                output.body.get("fallback_credit_token"),
+                Some(&token),
+                "fallback credit token must survive {:?} preservation",
+                policy.preservation,
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn anthropic_reconstruction_rejects_fallbacks_with_credit_token() {
+    let engine = TranslationEngine::default();
+    let body = json!({
+        "model": "claude-opus-4-8",
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": "Review this code for security flaws."}],
+        "fallback_credit_token": "example-token-from-refusal",
+        "fallbacks": [{"model": "claude-opus-5"}]
+    });
+    let error = engine
+        .translate_request(
+            WireFormat::AnthropicMessages,
+            WireFormat::AnthropicMessages,
+            &body,
+            &TranslationPolicy::default(),
+        )
+        .expect_err("fallback_credit_token cannot be combined with fallbacks");
+    assert!(matches!(
+        error,
+        TranslationError::InvalidValue { path, message }
+            if path == "$.fallback_credit_token"
+                && message == "fallback_credit_token cannot be combined with fallbacks"
+    ));
 }
 
 #[test]
@@ -3252,6 +3350,30 @@ fn openai_stop_string_maps_to_anthropic_stop_sequences() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn openai_tool_result_error_flag_survives_decoding() -> TestResult {
+    let engine = TranslationEngine::default();
+    for (flag, expected) in [
+        (Some(json!(true)), Some(true)),
+        (Some(json!(false)), Some(false)),
+        (None, None),
+        (Some(Value::Null), None),
+        (Some(json!("true")), None),
+    ] {
+        let mut message = json!({"role": "tool", "tool_call_id": "call_1", "content": "result"});
+        if let Some(flag) = flag {
+            message["is_error"] = flag;
+        }
+        let body = json!({"model": "route", "messages": [message]});
+        let decoded = engine.decode_request(WireFormat::OpenAiChat, &body, &normalized_policy())?;
+        let ContentBlock::ToolResult(result) = &decoded.request.messages[0].content[0] else {
+            panic!("expected tool result");
+        };
+        assert_eq!(result.is_error, expected);
+    }
+    Ok(())
+}
+
 // Verifies OpenAI tool results merge into Anthropic user tool-result content.
 #[test]
 fn openai_tool_results_are_merged_when_translating_to_anthropic() -> TestResult {
@@ -4048,7 +4170,7 @@ fn responses_lite_additional_tools_item_is_the_tool_list() -> TestResult {
         .request
         .tools
         .iter()
-        .map(|tool| tool.name.as_str())
+        .filter_map(|tool| tool.function().map(|tool| tool.name.as_str()))
         .collect::<Vec<_>>();
     assert_eq!(names, vec!["exec", "update_plan"]);
     assert!(

@@ -51,8 +51,9 @@ route reaches no upstream. A file without a `[targets]` table is rejected with
 | `format` | Yes | — | `openai_chat`, `openai_responses`, or `anthropic_messages`. |
 | `base_url` | Yes | — | Upstream base URL. |
 | `api_key_env` | No | unset | Name of the environment variable holding the key. Omit to send no authentication. |
-| `forward_auth` | No | `false` | Forward the caller's provider credential and application headers. All backends reachable through the route must use the same provider. |
+| `forward_auth` | No | `false` | Forward the caller's provider credential and application headers. A route's forwarding clients must use one credential family unless they all use the same scheme, host, and port, such as one LLM gateway. |
 | `extra_headers` | No | `{}` | Custom HTTP headers sent to the model server. Set credentials with `api_key_env` or `forward_auth`; the server rejects headers owned by the selected auth mode. Header names are case-insensitive. |
+| `fallback_on_rate_limit` | No | `true` | Try another completion candidate after an upstream HTTP 429 exhausts retries. Set to `false` to return the 429 instead. |
 | `max_retries` | No | `2` | Retry budget, `0`–`10`. |
 | `failure_cooldown_ms` | No | `5000` (5 seconds) | Skip a backend for this many milliseconds after an exhausted transient completion failure. Zero disables it. |
 | `timeout_ms` | No | unset | Deadline in milliseconds for all attempts, retry delays, and the complete response, including stream reads. Must be at least `1`. Unset leaves the wait unbounded. |
@@ -66,11 +67,16 @@ The cooldown starts after retries are exhausted.
 `failure_cooldown_ms` tracks transport failures, timeouts, HTTP 408/429, and 5xx
 responses after retries. State is shared across callers per model within the client,
 including callers using forwarded credentials. With `forward_auth = true`, HTTP 429
-only triggers request-local retries and fallback; other callers keep trying the model.
-For shared credentials, HTTP 429 also triggers cooldown. During cooldown,
+triggers request-local retries and, by default, fallback; other callers keep trying the model.
+For shared credentials, HTTP 429 also triggers cooldown by default. During cooldown,
 ordered fallback tries the next candidate. A terminal cooldown error returns HTTP
 503. Calls resume together after expiry. Auxiliary calls and errors after a stream
 is returned leave cooldown state unchanged.
+
+With `fallback_on_rate_limit = false`, HTTP 429 does not start cooldown, so later
+requests can receive the upstream response too. Retry budgets and deadlines still
+apply. Other errors keep their existing fallback and cooldown behavior. This option
+controls completion candidates; judge and advisor error recovery is unchanged.
 
 `timeout_ms` applies separately to every call through the client, including judge
 verdicts and answers. To give a judge a short deadline without limiting the
@@ -106,13 +112,40 @@ values.
 
 This setting gives `base_url` the caller's login. Enable it only when that
 upstream should receive the credential, and use HTTPS unless the upstream runs
-on loopback. All backends reachable through the route must use the same
-provider because other application headers are preserved and may contain
+on loopback. Other application headers are preserved and may contain
 provider-specific credentials. Forwarding clients do not follow HTTP redirects.
-Check every forwarding client used by a route, including classifier and judge
-targets. The server rejects an Anthropic forwarding route called through an
-OpenAI endpoint, or an OpenAI forwarding route called through an Anthropic
-endpoint, before it calls an upstream.
+
+A forwarded credential belongs to the service that issued it. A ChatGPT login,
+for example, must never reach Anthropic. So all forwarding clients in a route,
+including classifier and judge targets, must use one credential family: OpenAI
+(`openai_chat` and `openai_responses` clients, which serve Chat Completions and
+Responses callers) or Anthropic (`anthropic_messages` clients, which serve
+Messages callers).
+
+The exception is one host that serves both formats, such as an LLM gateway that
+accepts each caller's gateway key on its OpenAI and Anthropic endpoints. A route
+may mix the two families when all of its forwarding clients use the same scheme,
+host, and port in `base_url`; the path may differ:
+
+```toml
+[llm_clients.gateway_responses]
+format = "openai_responses"
+base_url = "https://gateway.example.com/v1"
+forward_auth = true
+
+[llm_clients.gateway_messages]
+format = "anthropic_messages"
+base_url = "https://gateway.example.com"
+forward_auth = true
+```
+
+Such a route serves Chat Completions and Responses callers and forwards the
+caller's bearer token to every forwarding client. The server returns `400` without
+calling an upstream when a caller uses an API that the route does not serve.
+
+These limits apply only to forwarded credentials. A client with `api_key_env`
+sends the server's own key, so a route can mix formats and providers through
+such clients.
 
 ## `[targets.<name>]`
 
@@ -122,6 +155,7 @@ endpoint, before it calls an upstream.
 | `llm_client` | Yes | — | Key under `[llm_clients]`. |
 | `system_prompt` | No | unset | System prompt prepended when this target serves a completion. |
 | `extra_body` | No | `{}` | Values merged into the upstream request when the request does not already set that key. |
+| `omit_body_fields` | No | `[]` | Top-level fields removed from every request body that Switchyard sends to this target. Switchyard removes them after it translates the request to the LLM client's `format`, so use that format's field names, for example `reasoning_effort` on `openai_chat` or `reasoning` on `openai_responses`. Switchyard applies `extra_body` and `reasoning_effort` after the removal, so either can set a removed field again. |
 | `reasoning_effort` | No | unset | Reasoning effort forced on every request to this target, replacing the value the caller sent (`reasoning.effort` on `openai_responses`, `reasoning_effort` on `openai_chat`). Rejected on `anthropic_messages` clients. Use it to run one target at a different effort than the client asked for, for example a strong tier at `max` behind a client that sends `high`. Targets with different effort settings need distinct model IDs when used within one route. Separate routes may use the same model ID with separate `llm_clients` entries (same endpoint, different name). |
 
 Within one route, callable targets with the same model ID must use the same `llm_client`.
@@ -195,12 +229,13 @@ Splits traffic across targets. See
 ### `plan_execute`
 
 Plans on a capable target, then switches to an efficient target after the first
-file mutation. See [Plan/Execute Routing](../routing_algorithms/plan_execute_routing.md).
+recognized edit or write tool call. See [Plan/Execute Routing](../routing_algorithms/plan_execute_routing.md).
 
 | Key | Required | Default | Meaning |
 |---|:---:|---|---|
 | `capable_target` | Yes | - | Target used for read-only inspection and planning. |
 | `efficient_target` | Yes | - | Target used after the first edit or write. |
+| `tool_semantics.mutate` | No | `[]` | Additional tool names that trigger handoff. See the [example](../routing_algorithms/plan_execute_routing.md#optional-settings). |
 | `planning_prompt` | No | packaged prompt | Replaces the planning instruction. |
 | `handoff_prompt` | No | unset | Adds an instruction to the handoff request. |
 | `planner_reasoning_as_text` | No | `false` | Converts visible planner reasoning summaries to assistant text at handoff. |
@@ -356,15 +391,18 @@ one manually.
 ### `composite`
 
 Composes other algorithms, letting one set another's
-configuration. Today a classifier sets the tier a stage router falls open to when its own signals are not confident, leaving its scoring and escalation logic untouched. See
+configuration. Today a classifier selects the stage router's starting tier and
+confidence threshold. Tool signals still drive escalation and recovery. See
 [Composite Routing](../routing_algorithms/composite_routing.md).
 
 | Key | Required | Default | Meaning |
 |---|:---:|---|---|
 | `classifier.target` | Yes | — | Target the tier judge is called through. Not a routing destination. |
-| `classifier.base_threshold` | Yes | — | `p_solve` floor that still routes to the efficient tier. In `[0, 1]`. |
+| `classifier.base_threshold` | For LLM judges | unset | `p_solve` floor that still routes to the efficient tier. In `[0, 1]`. Omit with `classifier.decision`. |
 | `classifier.threshold_step` | No | `0.0` | Finite, non-negative amount added once for uncertain or unmatched verdicts and twice for unsupported verdicts. `base_threshold + 2 * threshold_step` must be at most `1`. |
 | `classifier.classify_trigger` | Yes | — | `user_turn` re-picks the tier whenever the user speaks, `new_session` picks once and holds it. `every_request` is rejected here: a judge call per tool step is the cost this route exists to avoid. |
+| `classifier.decision` | No | unset | Use a decision model instead of an LLM judge. The classifier target must be in `decision_targets`. |
+| `classifier.fail_open` | No | `true` | On judge failure, retain the last classified tier or default to efficient. Set `false` to return the error. |
 | `classifier.message_hash_fallback` | No | `false` | Retains the tier by hashing the first user message, for clients that send no session ID. Works with either supported trigger. Conversations opening with the same text share a tier. |
 | `classifier.recent_turn_window` | No | unset | When unset, the judge sees the opening task and latest user follow-up, when present. When set, it also sees trailing turns. |
 | `classifier.prompt` | No | packaged prompt | Replaces the classifier judge prompt. The verdict schema is unchanged. |
@@ -372,7 +410,8 @@ configuration. Today a classifier sets the tier a stage router falls open to whe
 | `classifier.max_output_tokens` | No | `4096` | Maximum completion tokens for the judge verdict. Must be at least `1`. |
 | `stage.capable_target` | Yes | — | Capable tier. |
 | `stage.efficient_target` | Yes | — | Efficient tier. |
-| `stage.confidence_threshold` | Yes | — | Corroboration a decisive signal needs. In `[0, 1]`. |
+| `stage.efficient_first_threshold` | No | `0.5` | Signal confidence required after an Efficient classification. In `[0, 1]`. Also accepts `confidence_threshold`. |
+| `stage.capable_first_threshold` | No | `0.0` | Signal confidence required after a Capable classification. In `[0, 1]`. |
 | `stage.recent_turn_window` | No | `3` | Trailing tool results the signals are computed over. |
 | `stage.capable_hold_turns` | No | `2` | Requests kept on the capable tier after escalation. A clean test pass clears the hold early; `0` disables it. |
 | `stage.tool_semantics.observe` | No | `[]` | Additional exact ASCII case-insensitive tool names that count as observation. |
@@ -381,6 +420,10 @@ configuration. Today a classifier sets the tier a stage router falls open to whe
 | `stage.tool_semantics.new` | No | `[]` | Additional exact ASCII case-insensitive tool names that count as neutral forward activity. |
 | `stage.handoff_notes` | No | unset | Optional guidance appended to forwarded requests. Uses the same fields and behavior as [stage-router handoff notes](../routing_algorithms/stage_router_routing.md#optional-handoff-notes). |
 | `subagents` | No | unset | Nested policy used only for delegated sub-agent work. |
+
+For decision classifier configuration, see
+[Decision model classifier](../routing_algorithms/composite_routing.md#decision-model-classifier).
+The same decision settings are accepted by the optional `stage_router` classifier.
 
 The tier is retained per session. A deployment that sends no session ID needs
 `classifier.message_hash_fallback = true`, which keys on the first user message

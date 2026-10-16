@@ -154,6 +154,12 @@ async fn stream(
 runs. The terminal outcome either already contains the answer or supplies the selected model and
 ordered fallbacks for the client to try. `ClientRouter::single` is the single-provider case:
 
+Routing-time calls run concurrently. If an algorithm drops one of its waiting
+call futures, the corresponding HTTP work is dropped while other calls continue.
+Ending or dropping the run drops all outstanding call handlers. A returned
+response stream stays alive until its consumer finishes or drops it. These are
+local cancellation guarantees; a provider may continue generation after disconnect.
+
 ```rust
 use std::sync::Arc;
 use switchyard_libsy::{Algorithm, RuntimeModels};
@@ -242,7 +248,11 @@ fn build_multi_format_client(
   normalize `authorization`, `chatgpt-account-id`, and `x-openai-fedramp`.
   Anthropic backends forward `authorization` or `x-api-key`; they also keep
   `oauth-*` values from `anthropic-beta` and remove other caller-supplied beta values.
-  All backends reachable through a forwarding route must use the same provider.
+  The forwarding backends in one route must use one credential family (OpenAI or
+  Anthropic) unless they all use the same scheme, host, and port, such as one LLM
+  gateway that accepts the caller's gateway key on every endpoint. Such a route
+  serves Chat Completions and Responses callers and forwards their bearer token
+  to every forwarding backend. Backends that send a configured key are not restricted.
   Headers owned by other providers are preserved as application headers.
 - Per-backend custom headers go in `HttpBackendConfig::extra_headers`. Set credentials with
   `api_key`. OpenAI backends reject `Authorization`; Anthropic backends reject `x-api-key`

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! [`TranslatingLlmClient`] — the crate's single public entry point: encode a neutral
+//! [`TranslatingLlmClient`]: encode a neutral
 //! request, call the configured backend over HTTP, decode the neutral response.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -128,6 +128,7 @@ pub struct TranslatingLlmClient {
     model_to_config: HashMap<ModelId, ModelConfig>,
     client: reqwest::Client,
     forward_auth_client: reqwest::Client,
+    is_rate_limit_cooldown_enabled: bool,
     cooldown_epoch: Instant,
     // Milliseconds since cooldown_epoch. Each atomic is independent, so relaxed ordering suffices.
     unavailable_until: HashMap<ModelId, AtomicU64>,
@@ -166,9 +167,16 @@ impl TranslatingLlmClient {
             model_to_config,
             client,
             forward_auth_client,
+            is_rate_limit_cooldown_enabled: true,
             cooldown_epoch: Instant::now(),
             unavailable_until,
         })
+    }
+
+    /// Disable HTTP 429 cooldown so subsequent calls can receive the upstream error.
+    pub fn without_rate_limit_cooldown(mut self) -> Self {
+        self.is_rate_limit_cooldown_enabled = false;
+        self
     }
 
     /// The backend serving `model` over `format` — the default backend when its
@@ -302,11 +310,11 @@ impl TranslatingLlmClient {
         let result = self
             .send_with_retries(&url, backend, &body, metadata, model, streaming)
             .await;
-        // Forwarded credentials can hit a user's quota while the backend remains healthy.
+        // Keep quota failures request-local when forwarding auth or returning 429 to callers.
         if let Some(until) = unavailable_until
             && let Err(error) = &result
             && is_transient_failure(error)
-            && !(backend.is_forwarding_auth()
+            && !((backend.is_forwarding_auth() || !self.is_rate_limit_cooldown_enabled)
                 && matches!(error, LlmClientError::UpstreamHttp { status, .. } if *status == StatusCode::TOO_MANY_REQUESTS))
         {
             let deadline = duration_millis(self.cooldown_epoch.elapsed().saturating_add(cooldown));
@@ -640,8 +648,9 @@ impl TranslatingLlmClient {
     /// `http_headers` are carried through as the request's
     /// [`Metadata::http_headers`]. Backends with `forward_auth` disabled forward only
     /// allowed metadata headers; `forward_auth` backends forward all application
-    /// headers. All backends reachable through a forwarding route must use the same
-    /// provider. Transport headers are always rebuilt. Pass `None` to forward nothing.
+    /// headers. The forwarding backends in one route must use one credential family
+    /// unless they all use the same scheme, host, and port. Transport headers are always
+    /// rebuilt. Pass `None` to forward nothing.
     pub async fn call_rewrite_model_raw(
         &self,
         raw_http_request: Value,
@@ -896,7 +905,7 @@ fn record_gen_ai_request(url: &str, model: &str, streaming: bool) {
     }
 }
 
-fn convert_reqwest_error(error: reqwest::Error) -> LlmClientError {
+pub(crate) fn convert_reqwest_error(error: reqwest::Error) -> LlmClientError {
     // Reqwest labels truncated or otherwise unreadable response bodies as decode
     // errors, so distinguish them from serde JSON failures at the call site.
     let error = error.without_url();
