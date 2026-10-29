@@ -7,7 +7,7 @@
 //! draws and reads input.
 
 use crate::controller::{
-    Action, ActionKind, AppSettings, Availability, Controller, Reply, Snapshot,
+    Action, ActionKind, AppSettings, Availability, Controller, Reply, RouteInfo, Snapshot,
 };
 use crate::history::Entry;
 use crate::pricing::Estimate;
@@ -49,7 +49,7 @@ const SPINNER: [char; 8] = ['⣷', '⣯', '⣟', '⡿', '⢿', '⣻', '⣽', '�
 type Key = (&'static str, &'static str, &'static str);
 const GLOBAL_KEYS: &[Key] = &[
     (
-        "1-4",
+        "1-5",
         "page",
         "Switch pages. Tab, Shift-Tab, ← and → also switch pages.",
     ),
@@ -90,6 +90,21 @@ const MODELS_KEYS: &[Key] = &[(
     "period",
     "Switch the period: today, the past 7 days, or the whole log. The [ and ] keys also work.",
 )];
+const ROUTES_KEYS: &[Key] = &[
+    (
+        "↑↓",
+        "select",
+        "Select a route. j, PgUp, PgDn, g, and G also move it.",
+    ),
+    (
+        "/",
+        "filter",
+        "Filter as you type. Every word must appear in the route's public model ID, config \
+         name, algorithm, endpoints, or models. A word with a capital letter must match case \
+         exactly.",
+    ),
+    ("esc", "clear", "Clear the filter."),
+];
 const SETTINGS_KEYS: &[Key] = &[
     ("↑↓", "select", "Select an action. j, g, and G also move."),
     (
@@ -236,6 +251,13 @@ const CALL_COLUMNS: [(Column, bool); 8] = [
     (("OUT", Constraint::Length(7), true), false),
     (("COST", Constraint::Length(9), true), false),
 ];
+/// The routes table drops the columns marked `true` below 80 columns; the route details still
+/// show every model.
+const ROUTE_COLUMNS: [(Column, bool); 3] = [
+    (("ROUTE", Constraint::Fill(1), false), false),
+    (("ALGORITHM", Constraint::Length(24), false), false),
+    (("MODELS", Constraint::Fill(2), false), true),
+];
 
 /// Theme maps each kind of text to one style. NO_COLOR keeps the text modifiers.
 #[derive(Clone, Copy)]
@@ -288,16 +310,23 @@ enum Tab {
     Overview,
     Calls,
     Models,
+    Routes,
     Settings,
 }
-const TABS: [Tab; 4] = [Tab::Overview, Tab::Calls, Tab::Models, Tab::Settings];
+const TABS: [Tab; 5] = [
+    Tab::Overview,
+    Tab::Calls,
+    Tab::Models,
+    Tab::Routes,
+    Tab::Settings,
+];
 impl Tab {
     fn name(self) -> &'static str {
         match self {
             Tab::Overview => "Overview",
             Tab::Calls => "Calls",
             Tab::Models => "Models",
-
+            Tab::Routes => "Routes",
             Tab::Settings => "Settings",
         }
     }
@@ -638,7 +667,11 @@ struct App {
     selected: usize,
     offset: usize,
     action: usize,
-
+    route_filter: String,
+    /// These indexes point into `data.routes`, in config order, after the route filter.
+    route_visible: Vec<usize>,
+    route_selected: usize,
+    route_offset: usize,
     /// This field holds the last `ServerKeys` reply. It is `None` until the user checks the keys,
     /// and a failed check clears it so the page never shows outdated key states.
     server_keys: Option<Value>,
@@ -668,7 +701,10 @@ impl App {
             selected: 0,
             offset: 0,
             action: 0,
-
+            route_filter: String::new(),
+            route_visible: Vec::new(),
+            route_selected: 0,
+            route_offset: 0,
             server_keys: None,
             popup: None,
             popup_generation: 0,
@@ -703,6 +739,52 @@ impl App {
         self.visible
             .get(self.selected)
             .map(|&index| &self.data.entries[index])
+    }
+
+    /// A route keeps its selection by config name, so a refresh or a rename keeps it selected.
+    fn selected_route_key(&self) -> Option<String> {
+        self.selected_route().ok().map(|route| route.key.clone())
+    }
+
+    /// This function filters the routes and selects `anchor` if it is still listed. Otherwise
+    /// the selection keeps its position, so deleting a route selects the next one; `refilter`
+    /// starts from the first match instead.
+    fn rebuild_routes(&mut self, anchor: Option<String>) {
+        let algorithms = &self.data.algorithms;
+        let filter = self.route_filter.as_str();
+        self.route_visible = self
+            .data
+            .routes
+            .iter()
+            .enumerate()
+            .filter(|(_, route)| {
+                let title = algorithms
+                    .iter()
+                    .find(|algorithm| algorithm.kind == route.kind)
+                    .map_or("", |algorithm| algorithm.title);
+                matches_words(&[&route.label, &route.key, title], filter)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let routes = &self.data.routes;
+        self.route_selected = anchor
+            .and_then(|key| {
+                self.route_visible
+                    .iter()
+                    .position(|&index| routes[index].key == key)
+            })
+            .unwrap_or(self.route_selected)
+            .min(self.route_visible.len().saturating_sub(1));
+    }
+
+    fn selected_route(&self) -> Result<&RouteInfo, String> {
+        match self.route_visible.get(self.route_selected) {
+            Some(&index) => Ok(&self.data.routes[index]),
+            None if !self.data.routes.is_empty() => {
+                Err("No route matches the filter. Clear or change the filter first.".into())
+            }
+            None => Err("Choose a route first.".into()),
+        }
     }
 
     // Every replacement or dismissal changes the generation, even when the same form reopens.
@@ -770,9 +852,11 @@ impl App {
                     .selected_entry()
                     .filter(|_| self.selected > 0)
                     .map(|entry| (entry.ts.clone(), entry.model.clone(), entry.turn_id.clone()));
+                let route = self.selected_route_key();
                 self.data = *data;
                 self.refreshed = Some(Instant::now());
                 self.rebuild_calls();
+                self.rebuild_routes(route);
                 if let Some((ts, model, turn)) = anchor
                     && let Some(position) = self.visible.iter().position(|&index| {
                         let entry = &self.data.entries[index];
@@ -975,19 +1059,29 @@ impl App {
             (None, false, Tab::Overview) => &[],
             (None, false, Tab::Calls) => CALLS_KEYS,
             (None, false, Tab::Models) => MODELS_KEYS,
-
+            (None, false, Tab::Routes) => ROUTES_KEYS,
             (None, false, Tab::Settings) => SETTINGS_KEYS,
         }
     }
 
     /// The Calls and Routes pages each keep their own filter; `/` edits the current page's.
     fn filter_mut(&mut self) -> &mut String {
-        &mut self.filter
+        if self.tab == Tab::Routes {
+            &mut self.route_filter
+        } else {
+            &mut self.filter
+        }
     }
 
     fn refilter(&mut self) {
-        self.selected = 0;
-        self.rebuild_calls();
+        if self.tab == Tab::Routes {
+            let anchor = self.selected_route_key();
+            self.route_selected = 0;
+            self.rebuild_routes(anchor);
+        } else {
+            self.selected = 0;
+            self.rebuild_calls();
+        }
     }
 
     fn paste(&mut self, text: &str) {
@@ -1015,7 +1109,7 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') => self.set_popup(Some(Popup::Help { scroll: 0 })),
-            KeyCode::Char(digit @ '1'..='4') => {
+            KeyCode::Char(digit @ '1'..='5') => {
                 self.tab = TABS[digit as usize - '1' as usize];
             }
             KeyCode::Tab | KeyCode::Right => self.tab = TABS[(self.tab.index() + 1) % TABS.len()],
@@ -1031,7 +1125,10 @@ impl App {
                         self.session = None;
                         self.rebuild_calls();
                     }
-
+                    Tab::Routes => {
+                        self.route_filter.clear();
+                        self.refilter();
+                    }
                     Tab::Overview | Tab::Models | Tab::Settings => {}
                 }
             }
@@ -1055,7 +1152,7 @@ impl App {
                         KeyCode::Char('[') => self.period = self.period.previous(),
                         _ => {}
                     },
-
+                    Tab::Routes => self.routes_key(code),
                     Tab::Settings => return self.settings_key(code),
                 }
             }
@@ -1092,6 +1189,15 @@ impl App {
                 self.rebuild_calls();
             }
             _ => {}
+        }
+    }
+
+    fn routes_key(&mut self, code: KeyCode) {
+        let last = self.route_visible.len().saturating_sub(1);
+        if let Some(selected) = step(code, self.route_selected, last) {
+            self.route_selected = selected;
+        } else if code == KeyCode::Char('/') {
+            self.filtering = true;
         }
     }
 
@@ -1453,6 +1559,9 @@ fn block(theme: Theme, title: &str) -> Block<'static> {
 fn draw(frame: &mut Frame, app: &mut App) {
     // This exhaustive destructuring requires an update when Snapshot gains a field.
     let Snapshot {
+        clients: _,         // draw_endpoints and the endpoint forms show these clients.
+        algorithms: _,      // draw_routes and the algorithm fields show these algorithms.
+        routes: _,          // draw_routes and the route details show these routes.
         update_status: _,   // draw_settings shows the last update status.
         settings: _,        // draw_settings shows the app settings.
         data_state: _,      // draw_overview shows health; draw_models checks usage
@@ -1486,7 +1595,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
         Tab::Overview => draw_overview(frame, app, body),
         Tab::Calls => draw_calls(frame, app, body),
         Tab::Models => draw_models(frame, app, body),
-
+        Tab::Routes => draw_routes(frame, app, body),
         Tab::Settings => draw_settings(frame, app, body),
     }
     draw_status(frame, app, status);
@@ -2222,6 +2331,256 @@ fn draw_models(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(table(theme, &columns, routes), routes_area);
 }
 
+/// This function returns the algorithm's name, or the route type for a type the apps cannot
+/// write.
+fn algorithm_title<'a>(data: &'a Snapshot, kind: &'a str) -> &'a str {
+    data.algorithms
+        .iter()
+        .find(|algorithm| algorithm.kind == kind)
+        .map_or(kind, |algorithm| algorithm.title)
+}
+
+fn draw_routes(frame: &mut Frame, app: &mut App, area: Rect) {
+    let theme = app.theme;
+    // A server config that cannot be read lists no routes, so its error explains the empty list.
+    let errors = if app.data.routes.is_empty() && !app.data.errors.is_empty() {
+        (app.data.errors.len() as u16 + 2).min(area.height / 3)
+    } else {
+        0
+    };
+    let notes = endpoint_notes(theme, &app.data);
+    let endpoints = (app.data.clients.len().max(1) + notes.len() + 3) as u16;
+    let [errors_area, top, endpoints_area] = Layout::vertical([
+        Constraint::Length(errors),
+        Constraint::Fill(1),
+        Constraint::Length(endpoints.min(area.height / 3)),
+    ])
+    .areas(area);
+    if errors > 0 {
+        draw_errors(frame, app, errors_area);
+    }
+    draw_endpoints(frame, app, notes, endpoints_area);
+    let (title, lines) = match app.selected_route() {
+        Ok(route) => (route.id.clone(), route_lines(theme, &app.data, route)),
+        Err(_) => (
+            "Route".to_string(),
+            vec![Line::styled("No route selected.", theme.muted)],
+        ),
+    };
+    let detail = Paragraph::new(lines).wrap(Wrap { trim: false });
+    // Wide terminals put the details beside the list; others put them below it.
+    let (list, detail_area) = if top.width >= SIDE_DETAIL_WIDTH {
+        let [list, side] =
+            Layout::horizontal([Constraint::Fill(1), Constraint::Length(52)]).areas(top);
+        (list, side)
+    } else {
+        // The list keeps its borders, header, and the selected row; the details get the rest.
+        let rows = detail.line_count(top.width.saturating_sub(4)) as u16 + 2;
+        let [list, below] = Layout::vertical([
+            Constraint::Fill(1),
+            Constraint::Length(rows.min(top.height.saturating_sub(4))),
+        ])
+        .areas(top);
+        (list, below)
+    };
+    draw_route_table(frame, app, list);
+    frame.render_widget(
+        detail.block(block(theme, &title).padding(Padding::horizontal(1))),
+        detail_area,
+    );
+}
+
+fn draw_route_table(frame: &mut Frame, app: &mut App, area: Rect) {
+    // The table shows this many routes; the borders and the header row take three rows.
+    let height = usize::from(area.height.saturating_sub(3)).max(1);
+    let visible = app.route_visible.len();
+    app.route_offset = keep_visible(app.route_selected, app.route_offset, visible, height);
+    let app = &*app;
+    let theme = app.theme;
+    let mut title = vec![
+        Span::styled(" Routes ", Modifier::BOLD),
+        Span::styled(format!("[{}] ", count(visible as u64)), theme.muted),
+    ];
+    if !app.route_filter.is_empty() || app.filtering {
+        title.push(Span::styled(format!("/{} ", app.route_filter), theme.key));
+    }
+    let mut outer = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(if app.filtering {
+            theme.key
+        } else {
+            theme.border
+        })
+        .title(Line::from(title));
+    if visible == 0 {
+        let text = if app.data.routes.is_empty() {
+            "No routes in the server config."
+        } else {
+            "No routes match the filter. Press Esc to clear it."
+        };
+        frame.render_widget(
+            Paragraph::new(Line::styled(text, theme.muted))
+                .centered()
+                .block(outer.padding(Padding::top(1))),
+            area,
+        );
+        return;
+    }
+    outer = outer.title_bottom(
+        Line::styled(
+            format!(" {} of {} ", app.route_selected + 1, count(visible as u64)),
+            theme.muted,
+        )
+        .right_aligned(),
+    );
+    let wide = area.width >= 80;
+    let shown = |column: &(Column, bool)| wide || !column.1;
+    let rows: Vec<Row> = app.route_visible[app.route_offset..]
+        .iter()
+        .take(height)
+        .map(|&index| {
+            let route = &app.data.routes[index];
+            let cells = [
+                Cell::from(route.id.clone()),
+                Cell::from(algorithm_title(&app.data, &route.kind).to_string()),
+                Cell::from(route.models.join(", ")),
+            ];
+            Row::new(
+                cells
+                    .into_iter()
+                    .zip(&ROUTE_COLUMNS)
+                    .filter(|(_, column)| shown(column))
+                    .map(|(cell, _)| cell),
+            )
+        })
+        .collect();
+    let columns: Vec<Column> = ROUTE_COLUMNS
+        .iter()
+        .filter(|column| shown(column))
+        .map(|column| column.0)
+        .collect();
+    let mut state =
+        TableState::default().with_selected(Some(app.route_selected - app.route_offset));
+    frame.render_stateful_widget(
+        table(theme, &columns, rows)
+            .row_highlight_style(theme.selected)
+            .highlight_symbol("› ")
+            .block(outer),
+        area,
+        &mut state,
+    );
+    draw_scrollbar(frame, theme, area, visible, app.route_selected);
+}
+
+/// This function shows the selected route's algorithm and every model it calls first, so a
+/// short terminal still shows them, then the notes that limit editing it here.
+fn route_lines(theme: Theme, data: &Snapshot, route: &RouteInfo) -> Vec<Line<'static>> {
+    const WIDTH: usize = 11;
+    let field = |name: &str, value: String| labeled(theme, name, WIDTH, value);
+    let algorithm = data
+        .algorithms
+        .iter()
+        .find(|known| known.kind == route.kind);
+    let mut lines = vec![
+        field("Config", format!("[routes.{}]", route.key)),
+        field(
+            "Algorithm",
+            algorithm.map_or_else(
+                || route.kind.clone(),
+                |known| format!("{} ({})", known.title, known.kind),
+            ),
+        ),
+    ];
+    lines.extend(
+        route
+            .models
+            .iter()
+            .map(|model| field("Model", model.clone())),
+    );
+    lines.extend(
+        route
+            .judges
+            .iter()
+            .map(|judge| field("Judge", judge.clone())),
+    );
+    if !route.editable {
+        lines.push(Line::default());
+        lines.push(Line::styled(
+            "This routing method has no editor here. Edit its fields in the server config.",
+            theme.warn,
+        ));
+    }
+    if let Some(generated) = &route.generated {
+        lines.push(Line::default());
+        lines.push(Line::styled(
+            format!("Generated by {generated}. That tool can replace edits made here."),
+            theme.warn,
+        ));
+    }
+    if let Some(known) = algorithm {
+        lines.push(Line::default());
+        lines.push(Line::styled(known.summary, theme.muted));
+    }
+    lines
+}
+
+/// This function explains which endpoints cannot list their models.
+fn endpoint_notes(theme: Theme, data: &Snapshot) -> Vec<Line<'static>> {
+    let unlisted = "The app cannot list this endpoint's models. Type model IDs by hand.";
+    data.clients
+        .iter()
+        .flat_map(|client| {
+            let unlisted = client.unlisted.then(|| unlisted.to_string());
+            unlisted.into_iter().chain(client.note.clone()).map(|note| {
+                Line::from(vec![
+                    Span::styled(format!("{}: ", client.name), theme.muted),
+                    Span::styled(note, theme.warn),
+                ])
+            })
+        })
+        .collect()
+}
+
+fn draw_endpoints(frame: &mut Frame, app: &App, notes: Vec<Line<'static>>, area: Rect) {
+    let theme = app.theme;
+    let clients = &app.data.clients;
+    let outer = block(theme, &format!("Endpoints [{}]", clients.len()));
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+    if clients.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "The server config names no endpoints.",
+                theme.muted,
+            )),
+            inner,
+        );
+        return;
+    }
+    let [table_area, notes_area] = Layout::vertical([
+        Constraint::Length(clients.len() as u16 + 1),
+        Constraint::Fill(1),
+    ])
+    .areas(inner);
+    let rows: Vec<Row> = clients
+        .iter()
+        .map(|client| {
+            Row::new([
+                client.name.clone(),
+                client.host.clone(),
+                client.models.join(", "),
+            ])
+        })
+        .collect();
+    let columns = [
+        ("NAME", Constraint::Fill(1), false),
+        ("HOST", Constraint::Fill(1), false),
+        ("MODELS IN THE SERVER CONFIG", Constraint::Fill(3), false),
+    ];
+    frame.render_widget(table(theme, &columns, rows), table_area);
+    frame.render_widget(Paragraph::new(notes).wrap(Wrap { trim: false }), notes_area);
+}
+
 /// This function lists the server key variables from the last `ServerKeys` reply.
 fn key_lines(theme: Theme, keys: Option<&Value>) -> Vec<Line<'static>> {
     let Some(data) = keys else {
@@ -2356,7 +2715,10 @@ fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme;
     let left = if app.filtering {
-        let (filter, matches) = (&app.filter, app.visible.len());
+        let (filter, matches) = match app.tab {
+            Tab::Routes => (&app.route_filter, app.route_visible.len()),
+            _ => (&app.filter, app.visible.len()),
+        };
         Line::from(vec![
             Span::styled(" / ", theme.key),
             Span::raw(filter.clone()),
@@ -2673,6 +3035,7 @@ fn help_lines(theme: Theme, width: usize) -> Vec<Line<'static>> {
         ("Calls", CALLS_KEYS, Some(Tab::Calls)),
         ("While filtering calls or routes", FILTER_KEYS, None),
         ("Models", MODELS_KEYS, Some(Tab::Models)),
+        ("Routes", ROUTES_KEYS, Some(Tab::Routes)),
         ("Settings", SETTINGS_KEYS, Some(Tab::Settings)),
     ] {
         if !lines.is_empty() {
@@ -3509,7 +3872,7 @@ mod tests {
             match tab {
                 Tab::Calls => &['/', 's'],
                 Tab::Models => &['p', '[', ']'],
-
+                Tab::Routes => &['/'],
                 Tab::Overview | Tab::Settings => &[],
             }
         };

@@ -21,6 +21,7 @@ use libsy::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use strum_macros::IntoStaticStr;
 use switchyard_protocol::{Category, ModelId};
 
 /// Error returned when an algorithm description cannot be constructed.
@@ -335,7 +336,7 @@ pub struct LlmClassifierRouteConfig {
 }
 
 /// Routing policy applied only to delegated sub-agent work, nested inside a
-/// `passthrough` or `stage_router` route.
+/// `passthrough`, `llm_classifier`, `stage_router` or `composite` route.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SubagentRouteConfig {
@@ -375,9 +376,11 @@ impl SubagentRouteConfig {
     }
 }
 
-/// A routing algorithm described by configured target names.
-#[derive(Clone, Debug, Deserialize)]
+/// A routing algorithm described by configured target names. Converting it to `&str` gives
+/// the route's `type`, such as `stage_router`.
+#[derive(Clone, Debug, Deserialize, IntoStaticStr)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[strum(serialize_all = "snake_case")]
 pub enum AlgorithmSpec {
     /// Replies `OK` without calling any model. Useful for smoke tests.
     Noop {},
@@ -422,6 +425,9 @@ pub enum AlgorithmSpec {
         /// Judge and tier settings, written directly in the route table.
         #[serde(flatten)]
         config: LlmClassifierRouteConfig,
+        /// Separate policy for delegated sub-agent work.
+        #[serde(default)]
+        subagents: Option<SubagentRouteConfig>,
     },
     /// Picks a tier per turn by scoring signals from recent tool results.
     StageRouter {
@@ -789,25 +795,33 @@ impl AlgorithmSpec {
                 efficient_target,
                 ..
             } => vec![capable_target.as_str(), efficient_target.as_str()],
-            Self::LlmClassifier { config, .. } => match config.classifier_mode() {
-                ClassifierMode::Capability => config
-                    .weak_target
-                    .iter()
-                    .chain(&config.strong_target)
-                    .map(String::as_str)
-                    .collect(),
-                ClassifierMode::Escalation => config
-                    .strong_target
-                    .iter()
-                    .chain(&config.weak_target)
-                    .map(String::as_str)
-                    .collect(),
-                ClassifierMode::Custom => config
-                    .models
-                    .as_ref()
-                    .map(CategoryModelConfig::routing_names)
-                    .unwrap_or_default(),
-            },
+            Self::LlmClassifier {
+                config, subagents, ..
+            } => {
+                let mut names: Vec<&str> = match config.classifier_mode() {
+                    ClassifierMode::Capability => config
+                        .weak_target
+                        .iter()
+                        .chain(&config.strong_target)
+                        .map(String::as_str)
+                        .collect(),
+                    ClassifierMode::Escalation => config
+                        .strong_target
+                        .iter()
+                        .chain(&config.weak_target)
+                        .map(String::as_str)
+                        .collect(),
+                    ClassifierMode::Custom => config
+                        .models
+                        .as_ref()
+                        .map(CategoryModelConfig::routing_names)
+                        .unwrap_or_default(),
+                };
+                if let Some(subagents) = subagents {
+                    names.extend(subagents.routing_target_names());
+                }
+                names
+            }
             Self::StageRouter {
                 tiers, subagents, ..
             } => {
@@ -857,6 +871,14 @@ impl AlgorithmSpec {
     /// a classifier also calls its judge, and that call needs a client too.
     pub fn callable_target_names(&self) -> Vec<&str> {
         let mut names = self.routing_target_names();
+        names.extend(self.judge_target_names());
+        names
+    }
+
+    /// Targets the algorithm calls only to decide, such as a judge or an advisor. A target
+    /// that also answers requests appears in [`routing_target_names`](Self::routing_target_names) too.
+    pub fn judge_target_names(&self) -> Vec<&str> {
+        let mut names = Vec::new();
         match self {
             // Custom mode names its judge in `models.judge`; the other two modes
             // use the top-level `classifier_target`.
@@ -872,7 +894,7 @@ impl AlgorithmSpec {
                             .map(String::as_str),
                     );
                 } else {
-                    names.push(&config.classifier_target);
+                    names.push(config.classifier_target.as_str());
                 }
             }
             Self::StageRouter {
@@ -891,6 +913,10 @@ impl AlgorithmSpec {
         }
         // A sub-agent classifier calls its own judge, which is never a completion target.
         if let Self::Passthrough {
+            subagents: Some(subagents),
+            ..
+        }
+        | Self::LlmClassifier {
             subagents: Some(subagents),
             ..
         }
@@ -930,7 +956,7 @@ impl AlgorithmSpec {
                     vec![capable_target.clone(), efficient_target.clone()],
                 ),
             ]),
-            Self::LlmClassifier { config } => {
+            Self::LlmClassifier { config, .. } => {
                 classifier_runtime_model_names(config.validated_classifier_mode(route_name)?)
             }
             Self::StageRouter {
@@ -1006,6 +1032,7 @@ impl AlgorithmSpec {
 
         let subagents = match self {
             Self::Passthrough { subagents, .. }
+            | Self::LlmClassifier { subagents, .. }
             | Self::StageRouter { subagents, .. }
             | Self::Composite { subagents, .. } => subagents.as_ref(),
             _ => None,
@@ -1019,28 +1046,33 @@ impl AlgorithmSpec {
         Ok(RuntimeModelNames { parent, subagent })
     }
 
-    /// Response target and routing-only dependency for routers that answer while routing.
-    pub(crate) fn routing_response_and_dependency(&self) -> Option<(&str, &str)> {
+    /// Response target and routing-only dependencies for routers that answer while routing.
+    pub(crate) fn routing_response_and_dependencies(&self) -> Option<(&str, Vec<&str>)> {
         match self {
-            Self::LlmClassifier { config, .. }
-                if matches!(config.classifier_mode(), ClassifierMode::Escalation) =>
-            {
-                Some((
-                    config.weak_target.as_deref()?,
-                    config.classifier_target.as_str(),
-                ))
+            Self::LlmClassifier {
+                config, subagents, ..
+            } if matches!(config.classifier_mode(), ClassifierMode::Escalation) => {
+                // A sub-agent judge is routing-only too; on the answer model it would get
+                // that model's system_prompt.
+                let mut dependencies = vec![config.classifier_target.as_str()];
+                if let Some(subagents) = subagents {
+                    dependencies.extend(subagents.judge_target_names());
+                }
+                Some((config.weak_target.as_deref()?, dependencies))
             }
             Self::Advisor {
                 executor_target,
                 advisor_target,
                 ..
-            } => Some((executor_target, advisor_target)),
+            } => Some((executor_target, vec![advisor_target])),
             Self::Vgr { config } => Some((
                 &config.efficient_target,
-                config
-                    .judge_target
-                    .as_deref()
-                    .unwrap_or(&config.efficient_target),
+                vec![
+                    config
+                        .judge_target
+                        .as_deref()
+                        .unwrap_or(&config.efficient_target),
+                ],
             )),
             Self::Noop { .. }
             | Self::Random { .. }
@@ -1551,7 +1583,7 @@ fn build_algorithm(
         }
         AlgorithmSpec::LlmClassifier {
             config: classifier_config,
-            ..
+            subagents,
         } => {
             let mode = classifier_config.validated_classifier_mode(route_name)?;
             let algorithm = match mode {
@@ -1602,7 +1634,8 @@ fn build_algorithm(
                     error,
                 )
             })?;
-            Ok(Arc::new(algorithm))
+            let parent: Arc<dyn Algorithm> = Arc::new(algorithm);
+            attach_subagent_router(route_name, parent, subagents.as_ref(), targets)
         }
         AlgorithmSpec::StageRouter {
             tiers,
