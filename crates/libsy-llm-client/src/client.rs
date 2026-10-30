@@ -1403,6 +1403,8 @@ fn apply_reasoning_format(body: &mut Value, format: ReasoningFormat) {
         ReasoningFormat::OpenAi => ("reasoning", "reasoning_content"),
         ReasoningFormat::DeepSeek => ("reasoning_content", "reasoning"),
     };
+    // Empty counts as absent, as it does in the Chat decoder, so it never hides real reasoning.
+    let present = |value: &Value| !value.is_null() && value.as_str() != Some("");
     let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
         return;
     };
@@ -1410,8 +1412,8 @@ fn apply_reasoning_format(body: &mut Value, format: ReasoningFormat) {
         if message.get("role").and_then(Value::as_str) != Some("assistant") {
             continue;
         }
-        let moved = message.remove(other).filter(|value| !value.is_null());
-        if message.get(field).is_some_and(|value| !value.is_null()) {
+        let moved = message.remove(other).filter(present);
+        if message.get(field).is_some_and(present) {
             continue;
         }
         let value = moved.or_else(|| {

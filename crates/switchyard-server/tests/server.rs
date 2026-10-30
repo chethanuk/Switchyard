@@ -6212,6 +6212,64 @@ async fn target_reasoning_format_sets_the_field_the_upstream_reads() -> TestResu
             json!({}),
         ),
         (
+            "deepseek treats an empty field as absent and moves reasoning",
+            deepseek,
+            "/v1/chat/completions",
+            chat(turns(
+                json!({"role": "assistant", "content": "a", "reasoning": "t", "reasoning_content": ""}),
+            )),
+            rewritten.clone(),
+            json!({}),
+        ),
+        (
+            "openai treats an empty field as absent and moves reasoning_content",
+            openai,
+            "/v1/chat/completions",
+            chat(turns(
+                json!({"role": "assistant", "content": "a", "reasoning": "", "reasoning_content": "t"}),
+            )),
+            turns(json!({"role": "assistant", "content": "a", "reasoning": "t"})),
+            json!({}),
+        ),
+        (
+            "deepseek treats an empty field as absent and copies reasoning_details text",
+            deepseek,
+            "/v1/chat/completions",
+            chat(turns(json!({
+                "role": "assistant", "content": "a", "reasoning_content": "",
+                "reasoning_details": details
+            }))),
+            turns(json!({
+                "role": "assistant", "content": "a", "reasoning_content": "t",
+                "reasoning_details": details
+            })),
+            json!({}),
+        ),
+        (
+            "deepseek treats an empty other spelling as absent and copies reasoning_details text",
+            deepseek,
+            "/v1/chat/completions",
+            chat(turns(json!({
+                "role": "assistant", "content": "a", "reasoning": "",
+                "reasoning_details": details
+            }))),
+            turns(json!({
+                "role": "assistant", "content": "a", "reasoning_content": "t",
+                "reasoning_details": details
+            })),
+            json!({}),
+        ),
+        (
+            "deepseek does not send an empty value when no reasoning exists",
+            deepseek,
+            "/v1/chat/completions",
+            chat(turns(
+                json!({"role": "assistant", "content": "a", "reasoning": ""}),
+            )),
+            turns(json!({"role": "assistant", "content": "a"})),
+            json!({}),
+        ),
+        (
             "deepseek copies a reasoning_details summary",
             deepseek,
             "/v1/chat/completions",
