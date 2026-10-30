@@ -15,6 +15,7 @@ use futures_util::{StreamExt, stream};
 use http::StatusCode;
 use reqwest::RequestBuilder;
 use reqwest::header::{HeaderMap, RETRY_AFTER};
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use switchyard_protocol::{
     LlmRequest, LlmResponse, LlmResponseChunk, LlmResponseStream, LlmResponseStreamEvent, Metadata,
@@ -59,6 +60,16 @@ const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(250);
 const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 
+/// The OpenAI Chat field a target reads assistant reasoning from.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningFormat {
+    /// The `reasoning` field.
+    OpenAi,
+    /// The `reasoning_content` field.
+    DeepSeek,
+}
+
 /// How one model is served: the `default_backend` used when the request does not
 /// pin a wire format, plus any `other_backends` reachable over additional formats.
 #[derive(Clone, Debug)]
@@ -67,6 +78,7 @@ pub struct ModelConfig {
     default_backend: Backend,
     other_backends: Option<Vec<Backend>>,
     responses_reasoning: crate::ResponsesReasoningPolicy,
+    reasoning_format: Option<ReasoningFormat>,
 }
 
 impl ModelConfig {
@@ -82,6 +94,7 @@ impl ModelConfig {
             default_backend,
             other_backends,
             responses_reasoning: crate::ResponsesReasoningPolicy::default(),
+            reasoning_format: None,
         }
     }
 
@@ -89,6 +102,13 @@ impl ModelConfig {
     #[must_use]
     pub fn with_responses_reasoning(mut self, policy: crate::ResponsesReasoningPolicy) -> Self {
         self.responses_reasoning = policy;
+        self
+    }
+
+    /// Sets the OpenAI Chat field this model reads assistant reasoning from.
+    #[must_use]
+    pub fn with_reasoning_format(mut self, format: Option<ReasoningFormat>) -> Self {
+        self.reasoning_format = format;
         self
     }
 }
@@ -374,6 +394,13 @@ impl TranslatingLlmClient {
         }
         if matches!(backend, Backend::OpenAiChat(_)) {
             ensure_openai_stream_usage(&mut body);
+            if let Some(format) = self
+                .model_to_config
+                .get(model)
+                .and_then(|config| config.reasoning_format)
+            {
+                apply_reasoning_format(&mut body, format);
+            }
         }
         let streaming = endpoint.allows_streaming()
             && body.get("stream").and_then(Value::as_bool).unwrap_or(false);
@@ -1366,6 +1393,46 @@ fn apply_reasoning_effort(body: &mut Value, backend: &Backend) {
         // Anthropic has no effort field (thinking is a token budget); the runner rejects the
         // setting on Anthropic clients at load time, so this arm is unreachable in practice.
         Backend::Anthropic(_) => {}
+    }
+}
+
+// Moves assistant reasoning to the field this target reads and removes the other spelling. A
+// value already in the target's field wins. Details supply the text only when no plain field does.
+fn apply_reasoning_format(body: &mut Value, format: ReasoningFormat) {
+    let (field, other) = match format {
+        ReasoningFormat::OpenAi => ("reasoning", "reasoning_content"),
+        ReasoningFormat::DeepSeek => ("reasoning_content", "reasoning"),
+    };
+    // Empty counts as absent, as it does in the Chat decoder, so it never hides real reasoning.
+    let present = |value: &Value| !value.is_null() && value.as_str() != Some("");
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for message in messages.iter_mut().filter_map(Value::as_object_mut) {
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let moved = message.remove(other).filter(present);
+        if message.get(field).is_some_and(present) {
+            continue;
+        }
+        let value = moved.or_else(|| {
+            let text = message
+                .get("reasoning_details")?
+                .as_array()?
+                .iter()
+                .filter_map(|detail| {
+                    ["text", "summary"]
+                        .iter()
+                        .find_map(|key| detail.get(*key)?.as_str().filter(|text| !text.is_empty()))
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.is_empty()).then_some(Value::String(text))
+        });
+        if let Some(value) = value {
+            message.insert(field.to_string(), value);
+        }
     }
 }
 

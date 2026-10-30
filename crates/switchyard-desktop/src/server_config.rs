@@ -263,12 +263,18 @@ const COMMON_ROUTE_KEYS: [&str; 6] = [
 /// REQUEST_SETTINGS lists target settings that change the request body. The server keeps one
 /// target per model on a client, so it rejects two targets that name the
 /// same model on the same client with different values for these.
-const REQUEST_SETTINGS: [&str; 3] = ["omit_body_fields", "reasoning_effort", "extra_body"];
+const REQUEST_SETTINGS: [&str; 4] = [
+    "omit_body_fields",
+    "reasoning_effort",
+    "reasoning_format",
+    "extra_body",
+];
 
 /// TARGET_SETTINGS lists settings that a route takes on when it uses the target.
-const TARGET_SETTINGS: [&str; 4] = [
+const TARGET_SETTINGS: [&str; 5] = [
     "system_prompt",
     "reasoning_effort",
+    "reasoning_format",
     "extra_body",
     "omit_body_fields",
 ];
@@ -1037,8 +1043,8 @@ fn kept_settings_note(
         .collect();
     Some(if kept.is_empty() {
         format!(
-            "[targets.{name}] now names {} and has no omit_body_fields, reasoning_effort, or \
-             extra_body. Check whether the new model needs one of them.",
+            "[targets.{name}] now names {} and has no omit_body_fields, reasoning_effort, \
+             reasoning_format, or extra_body. Check whether the new model needs one of them.",
             new.model
         )
     } else {
@@ -1382,5 +1388,90 @@ mod tests {
         let routes = switchyard_runner::route_targets(&edited.text)
             .unwrap_or_else(|error| panic!("{error}\n{}", edited.text));
         assert!(routes.is_empty(), "{}", edited.text);
+    }
+
+    // The server rejects two targets for one model with different request settings, so the edit
+    // must reuse the target that already names the model instead of rewriting the route's own.
+    #[test]
+    fn moving_a_route_onto_a_model_reuses_a_target_with_conflicting_settings() {
+        for setting in ["reasoning_effort = 'high'", "reasoning_format = 'deepseek'"] {
+            let config = ServerConfig::parse(&format!(
+                "schema_version = 1\n\
+                 [llm_clients.c]\n\
+                 format = 'openai_chat'\n\
+                 base_url = 'https://example.test/v1'\n\
+                 [targets.a]\n\
+                 id = 'vendor/m'\n\
+                 llm_client = 'c'\n\
+                 system_prompt = 'x'\n\
+                 {setting}\n\
+                 [targets.b]\n\
+                 id = 'vendor/n'\n\
+                 llm_client = 'c'\n\
+                 system_prompt = 'y'\n\
+                 [routes.r1]\n\
+                 id = 'r1'\n\
+                 type = 'passthrough'\n\
+                 target = 'a'\n\
+                 [routes.r2]\n\
+                 id = 'r2'\n\
+                 type = 'passthrough'\n\
+                 target = 'b'\n",
+            ))
+            .expect("config");
+            let edited = config
+                .edit(
+                    "r2",
+                    config.algorithm("r2").expect("algorithm"),
+                    &[Choice {
+                        client: "c".into(),
+                        model: "vendor/m".into(),
+                    }],
+                )
+                .expect("edit");
+            switchyard_runner::Runner::from_toml(&edited.text)
+                .unwrap_or_else(|error| panic!("{setting}: {error}\n{}", edited.text));
+            assert!(
+                edited.notes.iter().any(|note| note.contains("[targets.a]")),
+                "{setting}: {:?}",
+                edited.notes
+            );
+        }
+    }
+
+    #[test]
+    fn moving_a_target_to_another_model_names_reasoning_format_in_the_note() {
+        let config = ServerConfig::parse(
+            "schema_version = 1\n\
+             [llm_clients.c]\n\
+             format = 'openai_chat'\n\
+             base_url = 'https://example.test/v1'\n\
+             [targets.b]\n\
+             id = 'vendor/n'\n\
+             llm_client = 'c'\n\
+             [routes.r]\n\
+             id = 'r'\n\
+             type = 'passthrough'\n\
+             target = 'b'\n",
+        )
+        .expect("config");
+        let edited = config
+            .edit(
+                "r",
+                config.algorithm("r").expect("algorithm"),
+                &[Choice {
+                    client: "c".into(),
+                    model: "vendor/z".into(),
+                }],
+            )
+            .expect("edit");
+        assert!(
+            edited
+                .notes
+                .iter()
+                .any(|note| note.contains("reasoning_format")),
+            "{:?}",
+            edited.notes
+        );
     }
 }
