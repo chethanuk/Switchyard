@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Typed, composable LLM routing and format translation for Python">
+        <meta name="description" content="Embed libsy, Switchyard's Rust LLM routing library, in your gateway or agent harness">
       
       
       
@@ -76,7 +76,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#switchyard-documentation" class="md-skip">
+        <a href="#switchyard" class="md-skip">
           Skip to content
         </a>
       
@@ -322,10 +322,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#project-overview" class="md-nav__link">
+  <a href="#choose-a-path" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Project Overview
+        Choose a Path
       
     </span>
   </a>
@@ -333,10 +333,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#first-run" class="md-nav__link">
+  <a href="#try-with-a-local-agent" class="md-nav__link">
     <span class="md-ellipsis">
       
-        First Run
+        Try With a Local Agent
       
     </span>
   </a>
@@ -344,10 +344,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#main-workflows" class="md-nav__link">
+  <a href="#explore" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Main Workflows
+        Explore
       
     </span>
   </a>
@@ -355,32 +355,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#configuration-model" class="md-nav__link">
+  <a href="#reference" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Configuration Model
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#routing-reference" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Routing Reference
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#operations-and-reference" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Operations and Reference
+        Reference
       
     </span>
   </a>
@@ -482,6 +460,175 @@
   
   
     <li class="md-nav__item">
+      <a href="mechanics_of_libsy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Mechanics of Libsy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Switchyard Protocols
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Switchyard Protocols
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="protocols/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="protocols/llm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM-Related Protocols
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="protocols/decisions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Decision Model-Related Protocols
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="known_issues/" class="md-nav__link">
         
   
@@ -489,7 +636,7 @@
   <span class="md-ellipsis">
     
   
-    Known Issues in 0.1.0
+    Known Issues
   
 
     
@@ -540,7 +687,7 @@
   <span class="md-ellipsis">
     
   
-    Guides
+    Integrate Switchyard
   
 
     
@@ -556,7 +703,7 @@
             <span class="md-nav__icon md-icon"></span>
             
   
-    Guides
+    Integrate Switchyard
   
 
           </label>
@@ -569,14 +716,14 @@
   
   
     <li class="md-nav__item">
-      <a href="guides/agent_launchers/" class="md-nav__link">
+      <a href="reference/host_integration/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Agent Launchers
+    Embed in Your Gateway or Harness
   
 
     
@@ -596,15 +743,64 @@
   
   
   
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_2" id="__nav_3_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Gateways
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Gateways
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
     <li class="md-nav__item">
-      <a href="skill_distillation/" class="md-nav__link">
+      <a href="integrations/nemo_relay/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Skill Distillation
+    NeMo Relay
   
 
     
@@ -613,6 +809,14 @@
   
 
       </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
     </li>
   
 
@@ -655,7 +859,7 @@
   <span class="md-ellipsis">
     
   
-    Concepts
+    Routing
   
 
     
@@ -671,7 +875,56 @@
             <span class="md-nav__icon md-icon"></span>
             
   
-    Concepts
+    Routing
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_4_1" id="__nav_4_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Algorithms
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Algorithms
   
 
           </label>
@@ -684,14 +937,14 @@
   
   
     <li class="md-nav__item">
-      <a href="core_concepts/" class="md-nav__link">
+      <a href="routing_algorithms/overview/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Core Concepts
+    Overview
   
 
     
@@ -712,14 +965,274 @@
   
   
     <li class="md-nav__item">
-      <a href="architecture/" class="md-nav__link">
+      <a href="routing_algorithms/llm_classifier_routing/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Architecture
+    Task (LLM Classifier)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="routing_algorithms/stage_router_routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Execution (Stage Router)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="routing_algorithms/plan_execute_routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plan/Execute Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="routing_algorithms/subagent_routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sub-Agent-Aware Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="routing_algorithms/random_routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Random Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="routing_algorithms/composite_routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Composite Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="routing_algorithms/escalation_router_routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Escalation-Router Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="routing_algorithms/advisor_gate_routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Advisor-Gate Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="routing_algorithms/vgr_routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Verification-Gated Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="routing_algorithms/model_selection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choose Models
   
 
     
@@ -770,7 +1283,7 @@
   <span class="md-ellipsis">
     
   
-    Routing
+    Evaluate Routing
   
 
     
@@ -786,7 +1299,7 @@
             <span class="md-nav__icon md-icon"></span>
             
   
-    Routing
+    Evaluate Routing
   
 
           </label>
@@ -799,14 +1312,14 @@
   
   
     <li class="md-nav__item">
-      <a href="routing_algorithms/overview/" class="md-nav__link">
+      <a href="benchmarks/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Overview
+    Benchmarks
   
 
     
@@ -827,98 +1340,14 @@
   
   
     <li class="md-nav__item">
-      <a href="routing_algorithms/random_routing/" class="md-nav__link">
+      <a href="tuning/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Random Routing
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="routing_algorithms/llm_classifier_routing/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    LLM Classifier Routing
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="routing_algorithms/sticky_routing/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Sticky Routing
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="routing_algorithms/cascade_routing/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Cascade Routing
+    Compare and Tune
   
 
     
@@ -969,7 +1398,7 @@
   <span class="md-ellipsis">
     
   
-    Operations
+    Local Demo
   
 
     
@@ -985,7 +1414,7 @@
             <span class="md-nav__icon md-icon"></span>
             
   
-    Operations
+    Local Demo
   
 
           </label>
@@ -998,14 +1427,14 @@
   
   
     <li class="md-nav__item">
-      <a href="operations/context_window/" class="md-nav__link">
+      <a href="operations/local_evaluation/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Context-Window Handling
+    Run the Reference Server
   
 
     
@@ -1014,6 +1443,147 @@
   
 
       </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_6_2" id="__nav_6_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Local Agents
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Local Agents
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="recipes/single_provider_coding_agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code and Codex
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="integrations/pi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    pi
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="integrations/oh_my_pi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Oh My Pi
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
     </li>
   
 
@@ -1085,14 +1655,14 @@
   
   
     <li class="md-nav__item">
-      <a href="cli_reference/" class="md-nav__link">
+      <a href="reference/compatibility/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    CLI Reference
+    API and Model Compatibility
   
 
     
@@ -1101,6 +1671,570 @@
   
 
       </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Protocols
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Protocols
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7_2_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2_1" id="__nav_7_2_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="3" aria-labelledby="__nav_7_2_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    LLM
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="reference/protocols/llm_requests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requests
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="reference/protocols/llm_responses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Responses and Streams
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="reference/protocols/translation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Translation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7_2_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2_2" id="__nav_7_2_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Decision Models
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="3" aria-labelledby="__nav_7_2_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Decision Models
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="reference/protocols/decision_questions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Questions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="reference/protocols/decision_answers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Answers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="reference/toml_schema/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Runner Configuration (TOML)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="reference/opentelemetry/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenTelemetry
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="reference/rust_api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rust API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="operations/context_window/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Context-Window Handling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="operations/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7_8" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_8" id="__nav_7_8_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Demo Server
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_8_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_8">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Demo Server
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="cli_reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="operations/soak_test/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Soak Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
     </li>
   
 
@@ -1142,10 +2276,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#project-overview" class="md-nav__link">
+  <a href="#choose-a-path" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Project Overview
+        Choose a Path
       
     </span>
   </a>
@@ -1153,10 +2287,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#first-run" class="md-nav__link">
+  <a href="#try-with-a-local-agent" class="md-nav__link">
     <span class="md-ellipsis">
       
-        First Run
+        Try With a Local Agent
       
     </span>
   </a>
@@ -1164,10 +2298,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#main-workflows" class="md-nav__link">
+  <a href="#explore" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Main Workflows
+        Explore
       
     </span>
   </a>
@@ -1175,32 +2309,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#configuration-model" class="md-nav__link">
+  <a href="#reference" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Configuration Model
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#routing-reference" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Routing Reference
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#operations-and-reference" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Operations and Reference
+        Reference
       
     </span>
   </a>
@@ -1227,180 +2339,68 @@
   
 
 
-<h1 id="switchyard-documentation">Switchyard Documentation<a class="headerlink" href="#switchyard-documentation" title="Permanent link">&para;</a></h1>
-<p>Switchyard is a typed control plane for LLM traffic. It sits between client
-applications and model backends, translates OpenAI Chat / Anthropic Messages /
-OpenAI Responses formats, and routes each request through profile-backed chains.</p>
-<p>Use Switchyard when you want coding agents, SDK clients, or internal services to
-keep their native API shape while traffic is served by a different provider,
-split across model tiers, or selected by routing policy.</p>
-<h2 id="project-overview">Project Overview<a class="headerlink" href="#project-overview" title="Permanent link">&para;</a></h2>
+<h1 id="switchyard">Switchyard<a class="headerlink" href="#switchyard" title="Permanent link">&para;</a></h1>
+<p>Switchyard helps an AI agent choose which model handles each request. Embed its Rust core, <strong>libsy</strong>, in your gateway or agent harness. Your application keeps its model clients, credentials, and service.</p>
+<p>Choose where routing belongs in your application. Use an existing integration,
+or embed libsy and keep your current model clients.</p>
+<h2 id="choose-a-path">Choose a Path<a class="headerlink" href="#choose-a-path" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
 <tr>
-<th>Area</th>
-<th>What Switchyard provides</th>
+<th>Goal</th>
+<th>Start here</th>
+<th>What you own</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>Client ingress</td>
-<td>OpenAI Chat Completions, Anthropic Messages, and OpenAI Responses compatible endpoints.</td>
+<td>Use routing through an inference provider</td>
+<td><a href="https://openrouter.ai/docs/guides/routing/routers/switchyard-router">Switchyard on OpenRouter</a></td>
+<td>Your API requests and provider account. Follow the provider's available algorithms and controls.</td>
 </tr>
 <tr>
-<td>Agent launchers</td>
-<td>One-command local proxies for Claude Code, Codex, and OpenClaw.</td>
+<td>Add routing to your gateway</td>
+<td><a href="integrations/nemo_relay/">NeMo Relay</a> or the experimental <a href="https://github.com/NVIDIA-NeMo/Switchyard/blob/11b8af782b452b4f8fbd47070724a985377fda1d/examples/litellm/README.md">LiteLLM integration</a></td>
+<td>Gateway deployment, credentials, and operation. Check each integration's limits.</td>
 </tr>
 <tr>
-<td>Format translation</td>
-<td>Request and response translation between supported wire formats.</td>
-</tr>
-<tr>
-<td>Routing policies</td>
-<td>Random splits, LLM classifier routing with optional session affinity, signal-driven cascade routing, and YAML route bundles.</td>
-</tr>
-<tr>
-<td>Operations</td>
-<td>Request/token statistics and context-window fallback behavior.</td>
-</tr>
-<tr>
-<td>Deployment options</td>
-<td>Local coding-agent proxy, shared HTTP service, or embedded Python runtime.</td>
+<td>Embed routing in a gateway, harness, or application</td>
+<td><a href="getting_started/">Rust quickstart</a>, then <a href="mechanics_of_libsy/">Mechanics of Libsy</a></td>
+<td>Model execution and application lifecycle. <a href="reference/host_integration/#python-bindings">Python bindings</a> use the same core.</td>
 </tr>
 </tbody>
 </table>
-<p>At a high level, Switchyard keeps client integrations separate from model
-providers and routing policy:</p>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>clients -&gt; compatible API surface -&gt; routing and resilience -&gt; model backends
-</span></code></pre></div>
-<p>For system context and request lifecycle diagrams, see
-<a href="architecture/">Architecture</a>.</p>
-<h2 id="first-run">First Run<a class="headerlink" href="#first-run" title="Permanent link">&para;</a></h2>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;nemo-switchyard[cli,server]&quot;</span>
-</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>switchyard<span class="w"> </span>configure
-</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>switchyard<span class="w"> </span>launch<span class="w"> </span>claude
-</span></code></pre></div>
-<p>For source installs, non-interactive configuration, and a curl sanity check, use
-<a href="getting_started/">Getting Started</a>.</p>
-<h2 id="main-workflows">Main Workflows<a class="headerlink" href="#main-workflows" title="Permanent link">&para;</a></h2>
-<div class="grid cards">
+<h2 id="try-with-a-local-agent">Try With a Local Agent<a class="headerlink" href="#try-with-a-local-agent" title="Permanent link">&para;</a></h2>
+<p>The <a href="operations/local_evaluation/">reference server</a> gives you a quick way to
+try routing with your own models. It demonstrates libsy, protocol conversion, and
+configured execution. It is for local demos and personal use, not a supported
+production deployment or a service to scale.</p>
+<p>Use it with <a href="recipes/single_provider_coding_agents/">Claude Code or Codex</a>,
+<a href="integrations/pi/">pi</a>, or <a href="integrations/oh_my_pi/">Oh My Pi</a>.</p>
+<h2 id="explore">Explore<a class="headerlink" href="#explore" title="Permanent link">&para;</a></h2>
 <ul>
-<li>
-<p><strong>Run coding agents</strong></p>
-<p>Launch Claude Code, Codex, or OpenClaw through a local Switchyard proxy.</p>
-<p><a href="guides/agent_launchers/">Agent Launchers</a></p>
-</li>
-<li>
-<p><strong>Configure routing</strong></p>
-<p>Pick between fixed splits, classifier routing, and cascade routing, with
-optional session affinity for classifier-driven conversations.</p>
-<p><a href="routing_algorithms/overview/">Routing Overview</a></p>
-</li>
-<li>
-<p><strong>Prepare skill distillation</strong></p>
-<p>Save a namespace for the intended automatic skill learning flow without
-changing request routing.</p>
-<p><a href="skill_distillation/">Skill Distillation</a></p>
-</li>
-<li>
-<p><strong>Understand the system</strong></p>
-<p>See how clients, routing policy, model backends, and operations fit
-together.</p>
-<p><a href="architecture/">Architecture</a></p>
-</li>
-<li>
-<p><strong>Operate the proxy</strong></p>
-<p>Understand context-window overflow handling and fallback behavior.</p>
-<p><a href="operations/context_window/">Context-Window Handling</a></p>
-</li>
+<li><a href="benchmarks/">Benchmarks</a>: compare Terminal-Bench 2.1 and DeepSWE results and open their routing configs</li>
+<li><a href="mechanics_of_libsy/">Mechanics of Libsy</a>: understand steps, calls, and outcomes</li>
+<li><a href="protocols/">Switchyard Protocols</a>: connect your model data to libsy</li>
+<li><a href="routing_algorithms/overview/">Routing Algorithms</a>: choose how requests select a model</li>
+<li><a href="reference/host_integration/">Host Integration</a>: connect your clients and application lifecycle</li>
+<li><a href="reference/rust_api/">Rust API</a>: browse the core library, protocols, translation, clients, and runner</li>
+<li><a href="operations/context_window/">Context-Window Handling</a>: configure eviction and retry behavior</li>
+<li><a href="tuning/">Tuning</a>: the loop from verifying routing to recording a result</li>
+<li><a href="operations/troubleshooting/">Troubleshooting</a>: symptoms, silent misconfigurations, and fixes</li>
 </ul>
-</div>
-<h2 id="configuration-model">Configuration Model<a class="headerlink" href="#configuration-model" title="Permanent link">&para;</a></h2>
-<p>Standalone deployments start with a profile config that separates provider
-connectivity, upstream targets, and client-facing profiles:</p>
-<div class="language-yaml highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nt">endpoints</span><span class="p">:</span>
-</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span><span class="nt">openrouter</span><span class="p">:</span>
-</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">    </span><span class="nt">api_key</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">${OPENROUTER_API_KEY}</span>
-</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">    </span><span class="nt">base_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://openrouter.ai/api/v1</span>
-</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>
-</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="nt">targets</span><span class="p">:</span>
-</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="w">  </span><span class="nt">strong</span><span class="p">:</span>
-</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="w">    </span><span class="nt">endpoint</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openrouter</span>
-</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openai/gpt-4o</span>
-</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="w">    </span><span class="nt">format</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openai</span>
-</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="w">  </span><span class="nt">weak</span><span class="p">:</span>
-</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a><span class="w">    </span><span class="nt">endpoint</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openrouter</span>
-</span><span id="__span-2-13"><a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a><span class="w">    </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openai/gpt-4o-mini</span>
-</span><span id="__span-2-14"><a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a><span class="w">    </span><span class="nt">format</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openai</span>
-</span><span id="__span-2-15"><a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a>
-</span><span id="__span-2-16"><a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a><span class="nt">profiles</span><span class="p">:</span>
-</span><span id="__span-2-17"><a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a><span class="w">  </span><span class="nt">smart</span><span class="p">:</span>
-</span><span id="__span-2-18"><a id="__codelineno-2-18" name="__codelineno-2-18" href="#__codelineno-2-18"></a><span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">random-routing</span>
-</span><span id="__span-2-19"><a id="__codelineno-2-19" name="__codelineno-2-19" href="#__codelineno-2-19"></a><span class="w">    </span><span class="nt">strong</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">strong</span>
-</span><span id="__span-2-20"><a id="__codelineno-2-20" name="__codelineno-2-20" href="#__codelineno-2-20"></a><span class="w">    </span><span class="nt">weak</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">weak</span>
-</span><span id="__span-2-21"><a id="__codelineno-2-21" name="__codelineno-2-21" href="#__codelineno-2-21"></a><span class="w">    </span><span class="nt">strong_probability</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.3</span>
-</span></code></pre></div>
-<p>Run it as a long-lived proxy. Profile and target ids appear as models on
-<code>GET /v1/models</code>, and clients select one with the request's <code>model</code> field:</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>switchyard<span class="w"> </span>serve<span class="w"> </span>--config<span class="w"> </span>profiles.yaml<span class="w"> </span>--port<span class="w"> </span><span class="m">4000</span>
-</span></code></pre></div>
-<p>The deprecated <code>--routing-profiles</code> flag is retained only for launcher-owned
-legacy bundles and saved bundle paths:</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>switchyard<span class="w"> </span>--routing-profiles<span class="w"> </span>routes.yaml<span class="w"> </span>--<span class="w"> </span>launch<span class="w"> </span>claude
-</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>switchyard<span class="w"> </span>--routing-profiles<span class="w"> </span>routes.yaml<span class="w"> </span>--<span class="w"> </span>configure
-</span></code></pre></div>
-<p>Profile ids, direct targets, legacy launcher compatibility, and persistence are
-covered in <a href="routing_algorithms/overview/">Routing Overview</a>.</p>
-<h2 id="routing-reference">Routing Reference<a class="headerlink" href="#routing-reference" title="Permanent link">&para;</a></h2>
-<table>
-<thead>
-<tr>
-<th>Need</th>
-<th>Read</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Fixed strong/weak traffic split for baselines or A/B tests</td>
-<td><a href="routing_algorithms/random_routing/">Random Routing</a></td>
-</tr>
-<tr>
-<td>Per-request strong/weak decisions from a classifier model</td>
-<td><a href="routing_algorithms/llm_classifier_routing/">LLM Classifier Routing</a></td>
-</tr>
-<tr>
-<td>Signal-driven weak/strong escalation with optional classifier fallback</td>
-<td><a href="routing_algorithms/cascade_routing/">Cascade Routing</a></td>
-</tr>
-<tr>
-<td>Conversation-level affinity for cache reuse</td>
-<td><a href="routing_algorithms/sticky_routing/">Sticky Routing</a></td>
-</tr>
-</tbody>
-</table>
-<h2 id="operations-and-reference">Operations and Reference<a class="headerlink" href="#operations-and-reference" title="Permanent link">&para;</a></h2>
-<table>
-<thead>
-<tr>
-<th>Topic</th>
-<th>Read</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Known limitations and workarounds for 0.1.0</td>
-<td><a href="known_issues/">Known Issues</a></td>
-</tr>
-<tr>
-<td>CLI syntax, flags, resolution rules, and environment variables</td>
-<td><a href="cli_reference/">CLI Reference</a></td>
-</tr>
-<tr>
-<td>Context-window overflow retry and fallback behavior</td>
-<td><a href="operations/context_window/">Context-Window Handling</a></td>
-</tr>
-</tbody>
-</table>
+<h2 id="reference">Reference<a class="headerlink" href="#reference" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="rust/switchyard_libsy/"><code>switchyard-libsy</code> API</a>: embeddable routing algorithms</li>
+<li><a href="rust/switchyard_protocol/"><code>switchyard-protocol</code> API</a>: provider-neutral model data</li>
+<li><a href="rust/switchyard_translation/"><code>switchyard-translation</code> API</a>: provider-format conversion</li>
+<li><a href="rust/switchyard_llm_client/"><code>switchyard-llm-client</code> API</a>: optional HTTP clients and execution helpers</li>
+<li><a href="rust/switchyard_runner/"><code>switchyard-runner</code> API</a>: configured route construction and execution</li>
+<li><a href="https://github.com/NVIDIA-NeMo/Switchyard/blob/11b8af782b452b4f8fbd47070724a985377fda1d/crates/switchyard-nemo-relay-plugin/README.md"><code>switchyard-nemo-relay-plugin</code></a>: native plugin build and configuration</li>
+<li><a href="https://github.com/NVIDIA-NeMo/Switchyard/blob/11b8af782b452b4f8fbd47070724a985377fda1d/examples/dynamo-preproc/README.md">Dynamo / agentgateway</a>: Switchyard PreProc integration example</li>
+<li><a href="reference/rust_api/#crate-boundary">Component responsibilities</a>: choose the crates your integration needs</li>
+<li><a href="cli_reference/">Demo server CLI</a>: local server commands and options</li>
+</ul>
 
 
 
