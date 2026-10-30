@@ -21,6 +21,7 @@ use libsy::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use strum_macros::IntoStaticStr;
 use switchyard_protocol::{Category, ModelId};
 
 /// Error returned when an algorithm description cannot be constructed.
@@ -182,6 +183,7 @@ struct CustomClassifierRouteConfig {
     message_hash_fallback: bool,
     recent_turn_window: Option<usize>,
     max_output_tokens: u64,
+    response_format_type: ClassifierResponseFormat,
 }
 
 /// Runtime model groups for a custom classifier, keyed by group name.
@@ -375,9 +377,11 @@ impl SubagentRouteConfig {
     }
 }
 
-/// A routing algorithm described by configured target names.
-#[derive(Clone, Debug, Deserialize)]
+/// A routing algorithm described by configured target names. Converting it to `&str` gives
+/// the route's `type`, such as `stage_router`.
+#[derive(Clone, Debug, Deserialize, IntoStaticStr)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[strum(serialize_all = "snake_case")]
 pub enum AlgorithmSpec {
     /// Replies `OK` without calling any model. Useful for smoke tests.
     Noop {},
@@ -537,6 +541,9 @@ pub struct VgrRouteConfig {
     pub active_approval: Option<String>,
     #[serde(default = "default_vgr_deadline")]
     pub deadline_seconds: f64,
+    /// Enforces VGR decision and efficient turn budgets. Defaults to true.
+    #[serde(default = "default_true")]
+    pub bounded_efficient: bool,
     #[serde(default = "default_true")]
     pub task_typing: bool,
     #[serde(default = "default_vgr_breaker_threshold")]
@@ -752,6 +759,7 @@ impl StageClassifierConfig {
 }
 
 impl AlgorithmSpec {
+    #[cfg(not(target_os = "wasi"))]
     pub(crate) fn decision_judge(&self) -> Option<(&str, &DecisionJudgeRouteConfig)> {
         match self {
             Self::LlmClassifier { config, .. } => config
@@ -857,6 +865,14 @@ impl AlgorithmSpec {
     /// a classifier also calls its judge, and that call needs a client too.
     pub fn callable_target_names(&self) -> Vec<&str> {
         let mut names = self.routing_target_names();
+        names.extend(self.judge_target_names());
+        names
+    }
+
+    /// Targets the algorithm calls only to decide, such as a judge or an advisor. A target
+    /// that also answers requests appears in [`routing_target_names`](Self::routing_target_names) too.
+    pub fn judge_target_names(&self) -> Vec<&str> {
+        let mut names = Vec::new();
         match self {
             // Custom mode names its judge in `models.judge`; the other two modes
             // use the top-level `classifier_target`.
@@ -872,7 +888,7 @@ impl AlgorithmSpec {
                             .map(String::as_str),
                     );
                 } else {
-                    names.push(&config.classifier_target);
+                    names.push(config.classifier_target.as_str());
                 }
             }
             Self::StageRouter {
@@ -1020,6 +1036,7 @@ impl AlgorithmSpec {
     }
 
     /// Response target and routing-only dependency for routers that answer while routing.
+    #[cfg(not(target_os = "wasi"))]
     pub(crate) fn routing_response_and_dependency(&self) -> Option<(&str, &str)> {
         match self {
             Self::LlmClassifier { config, .. }
@@ -1319,10 +1336,9 @@ impl LlmClassifierRouteConfig {
                     || base_threshold.is_some()
                     || threshold_step.is_some()
                     || escalation.is_some()
-                    || *response_format_type != ClassifierResponseFormat::JsonSchema
                 {
                     return Err(AlgorithmConfigError::new(format!(
-                        "llm_classifier route {route_name} mode custom cannot use capability or escalation fields and response_format_type must be 'json_schema'"
+                        "llm_classifier route {route_name} mode custom cannot use capability or escalation fields"
                     )));
                 }
                 let models = required_classifier_field(route_name, "models", models)?;
@@ -1358,6 +1374,7 @@ impl LlmClassifierRouteConfig {
                         message_hash_fallback: *message_hash_fallback,
                         recent_turn_window: *recent_turn_window,
                         max_output_tokens: *max_output_tokens,
+                        response_format_type: *response_format_type,
                     },
                 ))
             }
@@ -1444,6 +1461,7 @@ fn build_subagent_router_config(
             );
             classifier_config.recent_turn_window = config.recent_turn_window;
             classifier_config.max_output_tokens = config.max_output_tokens;
+            classifier_config.response_format_type = config.response_format_type;
             let classifier = Arc::new(
                 LlmTaskClassifier::new(LlmClassifierConfig::Custom {
                     default_target: config.default_target.clone(),
@@ -1590,6 +1608,7 @@ fn build_algorithm(
                     classifier_config.message_hash_fallback = config.message_hash_fallback;
                     classifier_config.recent_turn_window = config.recent_turn_window;
                     classifier_config.max_output_tokens = config.max_output_tokens;
+                    classifier_config.response_format_type = config.response_format_type;
                     LlmTaskClassifier::new(LlmClassifierConfig::Custom {
                         default_target: config.default_target,
                         config: classifier_config,
@@ -1831,6 +1850,7 @@ fn build_vgr(
         },
     };
     runtime.deadline = vgr_duration(route_name, "deadline_seconds", config.deadline_seconds)?;
+    runtime.bounded_efficient = config.bounded_efficient;
     runtime.task_typing = config.task_typing;
     runtime.confirmed_recovery_min_clean_tail = config.confirmed_recovery_min_clean_tail;
     runtime.agentic_handoff = config.agentic_handoff;

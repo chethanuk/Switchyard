@@ -24,6 +24,7 @@ use switchyard_protocol::{
     Category, DecisionResponse, LlmClientError, LlmResponse, LlmResponseStream,
     LlmResponseStreamEvent, Metadata, ModelId, Request, Response,
 };
+use switchyard_runner::AlgorithmFactory;
 use tokio::sync::Mutex;
 
 use crate::errors::{ContextWindowExceededError, py_libsy_error};
@@ -74,6 +75,19 @@ fn header_map_from_python(headers: &HashMap<String, String>) -> PyResult<http::H
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
     }
     Ok(result)
+}
+
+/// Attach normalized host metadata to a provider-neutral request.
+fn request_from_python(
+    request: &Bound<'_, PyAny>,
+    headers: Option<HashMap<String, String>>,
+) -> PyResult<Request> {
+    let headers = headers.as_ref().map(header_map_from_python).transpose()?;
+    Ok(Request {
+        llm_request: from_python(request)?,
+        raw_request: None,
+        metadata: headers.map(|headers| Metadata::from_headers(&headers)),
+    })
 }
 
 /// Classifier settings shared by standalone and stage-router classifiers.
@@ -219,7 +233,8 @@ impl PyCustomClassifierConfig {
         session_affinity=false,
         message_hash_fallback=false,
         recent_turn_window=None,
-        max_output_tokens=4096
+        max_output_tokens=4096,
+        response_format_type="json_schema"
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -230,6 +245,7 @@ impl PyCustomClassifierConfig {
         message_hash_fallback: bool,
         recent_turn_window: Option<usize>,
         max_output_tokens: u64,
+        response_format_type: &str,
     ) -> PyResult<Self> {
         // Convert the Python schema into serde JSON and pair it with the target-selector policy;
         // conversion failures propagate to Python through `PyResult`.
@@ -242,6 +258,7 @@ impl PyCustomClassifierConfig {
         inner.message_hash_fallback = message_hash_fallback;
         inner.recent_turn_window = recent_turn_window;
         inner.max_output_tokens = max_output_tokens;
+        inner.response_format_type = parse_response_format_type(response_format_type)?;
         Ok(Self { inner })
     }
 }
@@ -377,16 +394,17 @@ fn classifier_contract(
     if let Some(prompt) = prompt {
         contract = contract.with_prompt(prompt);
     }
-    let response_format_type = match response_format_type {
-        "json_schema" => ClassifierResponseFormat::JsonSchema,
-        "json_object" => ClassifierResponseFormat::JsonObject,
-        other => {
-            return Err(PyValueError::new_err(format!(
-                "response_format_type must be 'json_schema' or 'json_object', got {other:?}"
-            )));
-        }
-    };
-    Ok(contract.with_response_format_type(response_format_type))
+    Ok(contract.with_response_format_type(parse_response_format_type(response_format_type)?))
+}
+
+fn parse_response_format_type(response_format_type: &str) -> PyResult<ClassifierResponseFormat> {
+    match response_format_type {
+        "json_schema" => Ok(ClassifierResponseFormat::JsonSchema),
+        "json_object" => Ok(ClassifierResponseFormat::JsonObject),
+        other => Err(PyValueError::new_err(format!(
+            "response_format_type must be 'json_schema' or 'json_object', got {other:?}"
+        ))),
+    }
 }
 
 /// Judge target and policy used when stage-router signals are inconclusive.
@@ -852,6 +870,19 @@ struct PyRunStream {
     inner: Arc<Mutex<StepStream>>,
 }
 
+impl PyRunStream {
+    fn new(algorithm: &Arc<dyn Algorithm>, request: Request, models: Arc<RuntimeModels>) -> Self {
+        // Starting a run spawns Rust work, including when Python's event loop has not started.
+        let stream = {
+            let _guard = pyo3_async_runtimes::tokio::get_runtime().enter();
+            Arc::clone(algorithm).run_stream(request, models, State::default())
+        };
+        Self {
+            inner: Arc::new(Mutex::new(stream)),
+        }
+    }
+}
+
 #[pymethods]
 impl PyRunStream {
     fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
@@ -907,28 +938,88 @@ impl PyAlgorithm {
         subagent_models: Option<HashMap<String, Vec<String>>>,
         headers: Option<HashMap<String, String>>,
     ) -> PyResult<PyRunStream> {
-        let headers = headers.as_ref().map(header_map_from_python).transpose()?;
-        let request = Request {
-            llm_request: from_python(request)?,
-            raw_request: None,
-            metadata: headers.map(|headers| Metadata::from_headers(&headers)),
-        };
+        let request = request_from_python(request, headers)?;
         let mut runtime_models = RuntimeModels::new(category_models_from_python(models)?);
         if let Some(subagent_models) = subagent_models {
             runtime_models =
                 runtime_models.with_subagent(category_models_from_python(subagent_models)?);
         }
-        let stream = {
-            let _guard = pyo3_async_runtimes::tokio::get_runtime().enter();
-            Arc::clone(&self.inner).run_stream(request, Arc::new(runtime_models), State::default())
-        };
-        Ok(PyRunStream {
-            inner: Arc::new(Mutex::new(stream)),
-        })
+        Ok(PyRunStream::new(
+            &self.inner,
+            request,
+            Arc::new(runtime_models),
+        ))
     }
 
     fn __repr__(&self) -> &'static str {
         "Algorithm()"
+    }
+}
+
+/// Deployment algorithms parsed without constructing provider clients or reading credentials.
+#[pyclass(name = "AlgorithmFactory", module = "switchyard.libsy", frozen)]
+struct PyAlgorithmFactory {
+    inner: AlgorithmFactory,
+}
+
+#[pymethods]
+impl PyAlgorithmFactory {
+    /// Parse a complete deployment; invalid configuration raises `ValueError`.
+    #[staticmethod]
+    fn from_toml(py: Python<'_>, source: &str) -> PyResult<Self> {
+        let inner = py
+            .detach(|| AlgorithmFactory::from_toml(source))
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        Ok(Self { inner })
+    }
+
+    /// Build independent configured handles keyed by each route's public ID.
+    fn build(&self, py: Python<'_>) -> PyResult<BTreeMap<String, Py<PyConfiguredAlgorithm>>> {
+        let algorithms = py
+            .detach(|| self.inner.build())
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        algorithms
+            .into_iter()
+            .map(|(id, (algorithm, models))| {
+                Ok((
+                    id,
+                    Py::new(
+                        py,
+                        PyConfiguredAlgorithm {
+                            algorithm,
+                            models: Arc::new(models),
+                        },
+                    )?,
+                ))
+            })
+            .collect()
+    }
+}
+
+/// A reusable algorithm paired with its deployment's parent and subagent model groups.
+/// The host applies target prompts and provider settings when serving model calls.
+#[pyclass(name = "ConfiguredAlgorithm", module = "switchyard.libsy", frozen)]
+struct PyConfiguredAlgorithm {
+    algorithm: Arc<dyn Algorithm>,
+    models: Arc<RuntimeModels>,
+}
+
+#[pymethods]
+impl PyConfiguredAlgorithm {
+    /// Yield host-owned model and decision calls for a normalized request.
+    /// Libsy's per-run `State` is not carried forward, as in `Algorithm.run_stream`.
+    #[pyo3(signature = (request, *, headers=None))]
+    fn run_stream(
+        &self,
+        request: &Bound<'_, PyAny>,
+        headers: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyRunStream> {
+        let headers = headers.map(from_python).transpose()?;
+        Ok(PyRunStream::new(
+            &self.algorithm,
+            request_from_python(request, headers)?,
+            Arc::clone(&self.models),
+        ))
     }
 }
 
@@ -1110,6 +1201,8 @@ fn stage_router_algorithm(
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let libsy_module = PyModule::new(module.py(), "libsy")?;
     libsy_module.add_class::<PyAlgorithm>()?;
+    libsy_module.add_class::<PyAlgorithmFactory>()?;
+    libsy_module.add_class::<PyConfiguredAlgorithm>()?;
     libsy_module.add_class::<PyCustomClassifierConfig>()?;
     libsy_module.add_class::<PyDecisionCall>()?;
     libsy_module.add_class::<PyDeescalationConfig>()?;
