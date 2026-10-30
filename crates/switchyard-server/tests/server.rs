@@ -6080,3 +6080,223 @@ task_typing = false
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn target_reasoning_format_sets_the_field_the_upstream_reads() -> TestResult {
+    let turns = |assistant: Value| {
+        json!([
+            {"role": "user", "content": "hi"},
+            assistant,
+            {"role": "user", "content": "hello"}
+        ])
+    };
+    let chat = |messages: Value| json!({"model": ROUTE_MODEL, "messages": messages});
+    let anthropic = |assistant: Value| json!({"model": ROUTE_MODEL, "max_tokens": 16, "messages": turns(assistant)});
+    let tool_calls = json!([{
+        "id": "call_1", "type": "function", "function": {"name": "f", "arguments": "{}"}
+    }]);
+    let details = json!([{"type": "reasoning.text", "text": "t"}]);
+    let summary_details = json!([{"type": "reasoning.summary", "summary": "t"}]);
+    let deepseek = r#", reasoning_format = "deepseek""#;
+    let openai = r#", reasoning_format = "openai""#;
+    let rewritten = turns(json!({"role": "assistant", "content": "a", "reasoning_content": "t"}));
+    let thinking = json!({"role": "assistant", "content": [
+        {"type": "thinking", "thinking": "t"}, {"type": "text", "text": "a"}
+    ]});
+
+    // Rows with no setting come first: they pin main's output and prove the harness reaches the
+    // upstream, so a failure in a later row is about the setting.
+    for (name, settings, path, request, upstream_messages, upstream_fields) in [
+        (
+            "unset keeps a same-format spelling",
+            "",
+            "/v1/chat/completions",
+            chat(turns(
+                json!({"role": "assistant", "content": "a", "reasoning_content": "t"}),
+            )),
+            rewritten.clone(),
+            json!({}),
+        ),
+        (
+            "unset rebuilds Anthropic thinking as reasoning",
+            "",
+            "/v1/messages",
+            anthropic(thinking.clone()),
+            turns(json!({"role": "assistant", "content": "a", "reasoning": "t"})),
+            json!({}),
+        ),
+        (
+            "deepseek renames reasoning on a same-format request",
+            deepseek,
+            "/v1/chat/completions",
+            chat(turns(
+                json!({"role": "assistant", "content": "a", "reasoning": "t"}),
+            )),
+            rewritten.clone(),
+            json!({}),
+        ),
+        (
+            "openai renames reasoning_content on a same-format request",
+            openai,
+            "/v1/chat/completions",
+            chat(turns(
+                json!({"role": "assistant", "content": "a", "reasoning_content": "t"}),
+            )),
+            turns(json!({"role": "assistant", "content": "a", "reasoning": "t"})),
+            json!({}),
+        ),
+        (
+            "deepseek applies to a request rebuilt from Anthropic thinking",
+            deepseek,
+            "/v1/messages",
+            anthropic(thinking),
+            rewritten.clone(),
+            json!({}),
+        ),
+        (
+            "deepseek applies to a request rebuilt from a Responses reasoning item",
+            deepseek,
+            "/v1/responses",
+            json!({"model": ROUTE_MODEL, "input": [
+                {"role": "user", "content": "hi"},
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "t"}]},
+                {"type": "message", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "a"}]},
+                {"role": "user", "content": "hello"}
+            ]}),
+            rewritten.clone(),
+            json!({}),
+        ),
+        (
+            "deepseek keeps the value already in its field when both spellings arrive",
+            deepseek,
+            "/v1/chat/completions",
+            chat(turns(
+                json!({"role": "assistant", "content": "a", "reasoning": "x", "reasoning_content": "t"}),
+            )),
+            rewritten.clone(),
+            json!({}),
+        ),
+        (
+            "openai keeps the value already in its field when both spellings arrive",
+            openai,
+            "/v1/chat/completions",
+            chat(turns(
+                json!({"role": "assistant", "content": "a", "reasoning": "t", "reasoning_content": "x"}),
+            )),
+            turns(json!({"role": "assistant", "content": "a", "reasoning": "t"})),
+            json!({}),
+        ),
+        (
+            "deepseek applies to a streaming request",
+            deepseek,
+            "/v1/chat/completions",
+            json!({"model": ROUTE_MODEL, "stream": true, "messages": turns(
+                json!({"role": "assistant", "content": "a", "reasoning": "t"})
+            )}),
+            rewritten.clone(),
+            json!({"stream": true}),
+        ),
+        (
+            "deepseek treats a null field as absent and copies reasoning_details text",
+            deepseek,
+            "/v1/chat/completions",
+            chat(turns(json!({
+                "role": "assistant", "content": null, "reasoning_content": null,
+                "reasoning_details": details, "tool_calls": tool_calls
+            }))),
+            turns(json!({
+                "role": "assistant", "content": null, "reasoning_content": "t",
+                "reasoning_details": details, "tool_calls": tool_calls
+            })),
+            json!({}),
+        ),
+        (
+            "deepseek copies a reasoning_details summary",
+            deepseek,
+            "/v1/chat/completions",
+            chat(turns(
+                json!({"role": "assistant", "content": "a", "reasoning_details": summary_details}),
+            )),
+            turns(json!({
+                "role": "assistant", "content": "a", "reasoning_content": "t",
+                "reasoning_details": summary_details
+            })),
+            json!({}),
+        ),
+        (
+            "deepseek leaves non-assistant messages alone",
+            deepseek,
+            "/v1/chat/completions",
+            chat(json!([
+                {"role": "user", "content": "hi", "reasoning": "u"},
+                {"role": "assistant", "content": "a", "reasoning": "t"},
+                {"role": "user", "content": "hello"}
+            ])),
+            json!([
+                {"role": "user", "content": "hi", "reasoning": "u"},
+                {"role": "assistant", "content": "a", "reasoning_content": "t"},
+                {"role": "user", "content": "hello"}
+            ]),
+            json!({}),
+        ),
+        (
+            "deepseek works alongside reasoning_effort",
+            r#", reasoning_format = "deepseek", reasoning_effort = "max""#,
+            "/v1/chat/completions",
+            chat(turns(
+                json!({"role": "assistant", "content": "a", "reasoning": "t"}),
+            )),
+            rewritten.clone(),
+            json!({"reasoning_effort": "max"}),
+        ),
+        // Limit: Chat encoding drops signed thinking before this setting runs, so there is
+        // nothing to move.
+        (
+            "deepseek has nothing to move for signed Anthropic thinking",
+            deepseek,
+            "/v1/messages",
+            anthropic(json!({"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "t", "signature": "sig"},
+                {"type": "text", "text": "a"}
+            ]})),
+            turns(json!({"role": "assistant", "content": "a"})),
+            json!({}),
+        ),
+    ] {
+        let upstream = MockUpstream::start().await?;
+        let config = format!(
+            r#"
+schema_version = 1
+[llm_clients.mock]
+format = "openai_chat"
+base_url = "{base_url}"
+max_retries = 0
+[targets]
+first = {{ id = "model/one", llm_client = "mock"{settings} }}
+[routes.chat]
+id = "{ROUTE_MODEL}"
+type = "passthrough"
+target = "first"
+"#,
+            base_url = upstream.base_url,
+        );
+        let state =
+            load_test_config(&config).unwrap_or_else(|error| panic!("{name}: config: {error}"));
+        let app = build_switchyard_router(state);
+        let response = send(&app, "POST", path, Some(request)).await?;
+        assert_eq!(
+            response.status,
+            StatusCode::OK,
+            "{name}: {}",
+            response.text()?
+        );
+        let calls = upstream.calls.lock().await;
+        let call = calls.last().expect("upstream request");
+        assert_eq!(call["messages"], upstream_messages, "{name}");
+        for (field, value) in upstream_fields.as_object().expect("fields object") {
+            assert_eq!(&call[field], value, "{name}: {field}");
+        }
+    }
+    Ok(())
+}

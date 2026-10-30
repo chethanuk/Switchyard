@@ -283,6 +283,8 @@ fn build_multi_format_client(
   the request sets `store: false`. Switchyard's translated Anthropic reasoning is
   removed. Set `Drop` for
   a backend that cannot consume provider reasoning. Messages and tool history are retained.
+- `ModelConfig::with_reasoning_format` picks the OpenAI Chat field assistant reasoning is
+  sent in, `reasoning` or `reasoning_content`, and removes the other.
 - `HttpBackendConfig::failure_cooldown` skips completion calls to a backend briefly
   after an exhausted transient failure. Zero disables it. State is shared per model
   within the client. Calls resume when the cooldown expires. Deployment TOML defaults

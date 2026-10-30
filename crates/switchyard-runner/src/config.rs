@@ -14,7 +14,8 @@ use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use switchyard_llm_client::{
     AuxiliaryOperation, Backend, ClientRouter, DEFAULT_MAX_RETRIES, HttpBackendConfig, ModelConfig,
-    OpenAiDecisionClient, ResponsesReasoningPolicy, SystemOneClient, TranslatingLlmClient,
+    OpenAiDecisionClient, ReasoningFormat, ResponsesReasoningPolicy, SystemOneClient,
+    TranslatingLlmClient,
 };
 use switchyard_protocol::{ModelId, RoutedDecisionClient, RoutedLlmClient, WireFormat};
 
@@ -397,11 +398,12 @@ impl DeploymentConfig {
                 std::collections::hash_map::Entry::Occupied(slot) => {
                     let (first_name, first) = slot.get();
                     if first.reasoning_effort != target.reasoning_effort
+                        || first.reasoning_format != target.reasoning_format
                         || first.extra_body != target.extra_body
                         || first.omit_body_fields != target.omit_body_fields
                     {
                         return Err(RunnerError::configuration(format!(
-                            "targets {first_name} and {target_name} both name model {} on llm client {} but with different reasoning_effort, extra_body, or omit_body_fields; one target per model id is kept, so give each its own model id or llm client",
+                            "targets {first_name} and {target_name} both name model {} on llm client {} but with different reasoning_effort, reasoning_format, extra_body, or omit_body_fields; one target per model id is kept, so give each its own model id or llm client",
                             target.id, target.llm_client
                         )));
                     }
@@ -517,6 +519,13 @@ impl DeploymentConfig {
                     )));
                 }
             }
+            if target.reasoning_format.is_some()
+                && !matches!(client_config.format, ClientFormat::OpenAiChat)
+            {
+                return Err(RunnerError::configuration(format!(
+                    "target {target_name} reasoning_format is only supported on openai_chat clients"
+                )));
+            }
             model_configs.push(
                 ModelConfig::new(
                     target.id.clone(),
@@ -529,7 +538,8 @@ impl DeploymentConfig {
                     )?,
                     None,
                 )
-                .with_responses_reasoning(client_config.responses_reasoning.unwrap_or_default()),
+                .with_responses_reasoning(client_config.responses_reasoning.unwrap_or_default())
+                .with_reasoning_format(target.reasoning_format),
             );
         }
 
@@ -940,6 +950,9 @@ struct TargetConfig {
     /// Reasoning effort forced on every request to this target, replacing the caller's value.
     /// Only meaningful on `openai_chat` and `openai_responses` clients.
     reasoning_effort: Option<String>,
+    /// The Chat field this target reads assistant reasoning from: `openai` for `reasoning`,
+    /// `deepseek` for `reasoning_content`. Only valid on `openai_chat` clients.
+    reasoning_format: Option<ReasoningFormat>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -1769,6 +1782,85 @@ classify_trigger"#,
     }
 
     #[test]
+    fn a_target_reasoning_format_is_validated_at_load() {
+        let chat = "[targets.classifier]\nid = \"classifier/model\"\nllm_client = \"primary\"";
+        let strong = "[targets.strong]\nid = \"strong/model\"\nllm_client = \"responses\"";
+        let weak = "[targets.weak]\nid = \"weak/model\"\nllm_client = \"anthropic\"";
+        let chat_with = |format: &str| format!("{chat}\nreasoning_format = \"{format}\"");
+        let chat_twin = |first: &str, second: &str| {
+            format!(
+                "{chat}{first}\n\n[targets.twin]\nid = \"classifier/model\"\nllm_client = \"primary\"{second}"
+            )
+        };
+        let not_chat = "reasoning_format is only supported on openai_chat";
+        let conflict =
+            "different reasoning_effort, reasoning_format, extra_body, or omit_body_fields";
+        let deepseek = "\nreasoning_format = \"deepseek\"";
+        let openai = "\nreasoning_format = \"openai\"";
+
+        for (name, target, replacement, expected_error) in [
+            ("openai on chat loads", chat, chat_with("openai"), None),
+            ("deepseek on chat loads", chat, chat_with("deepseek"), None),
+            (
+                "unknown value fails",
+                chat,
+                chat_with("gemini"),
+                Some("unknown variant"),
+            ),
+            (
+                "wrong case fails",
+                chat,
+                chat_with("DeepSeek"),
+                Some("unknown variant"),
+            ),
+            (
+                "responses client fails",
+                strong,
+                format!("{strong}{openai}"),
+                Some(not_chat),
+            ),
+            (
+                "anthropic client fails",
+                weak,
+                format!("{weak}{deepseek}"),
+                Some(not_chat),
+            ),
+            (
+                "same id with different formats fails",
+                chat,
+                chat_twin(openai, deepseek),
+                Some(conflict),
+            ),
+            (
+                "same id with one format unset fails",
+                chat,
+                chat_twin(deepseek, ""),
+                Some(conflict),
+            ),
+            (
+                "same id with the same format loads",
+                chat,
+                chat_twin(deepseek, deepseek),
+                None,
+            ),
+        ] {
+            assert!(VALID_CONFIG.contains(target), "{name}");
+            let config = VALID_CONFIG.replace(target, &replacement);
+            match expected_error {
+                Some(expected) => {
+                    let message = error_message(&config);
+                    assert!(message.contains(expected), "{name}: {message}");
+                }
+                None => assert!(
+                    runner_from_toml(&config).is_ok(),
+                    "{name}: {}",
+                    error_message(&config)
+                ),
+            }
+        }
+    }
+
+    #[test]
     fn duplicate_targets_with_conflicting_settings_are_rejected() -> RunnerResult<()> {
         let strong = "[targets.strong]\nid = \"strong/model\"\nllm_client = \"responses\"";
         assert!(VALID_CONFIG.contains(strong));
@@ -1780,8 +1872,9 @@ classify_trigger"#,
             ),
         );
         assert!(
-            error_message(&conflicting)
-                .contains("different reasoning_effort, extra_body, or omit_body_fields"),
+            error_message(&conflicting).contains(
+                "different reasoning_effort, reasoning_format, extra_body, or omit_body_fields"
+            ),
             "{}",
             error_message(&conflicting)
         );

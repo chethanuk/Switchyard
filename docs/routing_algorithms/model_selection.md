@@ -286,7 +286,7 @@ Record it with every result. Three rules apply:
   to load:
 
     ```text
-    targets strong and strong_max both name model openai/gpt-4o on llm client openrouter but with different reasoning_effort, extra_body, or omit_body_fields; one target per model id is kept, so give each its own model id or llm client
+    targets strong and strong_max both name model openai/gpt-4o on llm client openrouter but with different reasoning_effort, reasoning_format, extra_body, or omit_body_fields; one target per model id is kept, so give each its own model id or llm client
     ```
 
     Separate routes can use separate `llm_clients` entries for the same
