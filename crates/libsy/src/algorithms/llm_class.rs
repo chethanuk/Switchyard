@@ -2187,6 +2187,19 @@ mod tests {
             messages.extend(parallel_group(calls, chars));
             messages
         };
+        // Anthropic clients send all results of one step in one user message.
+        let follow_up_then_results_in_one_message = |calls: usize, chars: usize| {
+            let mut messages = follow_up_then_group(0, calls, chars);
+            let content = messages
+                .drain(4..)
+                .flat_map(|result| result.content)
+                .collect();
+            messages.push(Message {
+                role: Role::User,
+                content,
+            });
+            messages
+        };
         let task_of = |blocks: Vec<ContentBlock>| {
             let task = Message {
                 role: Role::User,
@@ -2320,6 +2333,12 @@ mod tests {
             (
                 "a long follow-up survives eight parallel results",
                 follow_up_then_group(6_000, 8, 2_300),
+                vec!["LATEST_USER_ASK", "tool_call search", "[trimmed]"],
+                vec![],
+            ),
+            (
+                "a follow-up survives four large results in one message",
+                follow_up_then_results_in_one_message(4, 40_000),
                 vec!["LATEST_USER_ASK", "tool_call search", "[trimmed]"],
                 vec![],
             ),
@@ -2587,6 +2606,17 @@ mod tests {
                 ],
                 "[content omitted: too long]",
             ),
+            (
+                "an opening message of only tool results, too many to fit, becomes empty text",
+                Some(10),
+                vec![Message {
+                    role: Role::User,
+                    content: (0..2_000)
+                        .flat_map(|_| tool_result("gone").content)
+                        .collect(),
+                }],
+                r#"{"role":"user","content":[{"type":"text","text":""}]}"#,
+            ),
         ];
 
         for (name, recent_turn_window, messages, marker) in cases {
@@ -2597,7 +2627,9 @@ mod tests {
                 .map(crate::algorithms::util::transcript::message_text)
                 .collect();
             assert!(text.chars().count() <= 18_000, "{name}");
-            assert!(text.contains(marker), "{name}: {text}");
+            // Serialized so a row can pin an empty block, which has no text to search for.
+            let json = serde_json::to_string(&actual).expect("messages serialize");
+            assert!(json.contains(marker), "{name}: {json}");
             assert!(
                 !actual
                     .iter()
