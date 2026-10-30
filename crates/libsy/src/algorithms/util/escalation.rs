@@ -45,7 +45,7 @@ const SYSTEM_CHARS: usize = 1_000;
 const TASK_CHARS: usize = 4_000;
 
 /// Backstop on the assembled transcript; the per-message caps normally bind first.
-const MAX_REQUEST_CHARS: usize = 18_000;
+pub(crate) const MAX_REQUEST_CHARS: usize = 18_000;
 
 /// Optional policy for returning an escalated session to the efficient tier.
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -337,7 +337,7 @@ pub(crate) fn conversation_turn(request: &Request) -> usize {
 ///
 /// The head gets two thirds of the surviving budget: for a trajectory judge the command or
 /// error signature that opens a message carries more signal than its trailing output.
-fn truncate_middle(text: &str, limit: usize) -> String {
+pub(crate) fn truncate_middle(text: &str, limit: usize) -> String {
     let chars: Vec<char> = text.chars().collect();
     if chars.len() <= limit {
         return text.to_string();
