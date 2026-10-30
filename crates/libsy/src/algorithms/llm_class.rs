@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Deserializer};
-use serde_json::Value;
+use serde_json::{Value, json};
 use switchyard_protocol::{Category, ContentBlock, Message, Role};
 
 mod decision;
@@ -22,7 +22,7 @@ use super::util::affinity::{AffinityRouter, ClassifyTrigger};
 use super::util::classifier_contract::{
     ClassifierContract, ClassifierContractConfig, ClassifierResponseFormat,
 };
-use super::util::escalation::EscalationJudgeConfig;
+use super::util::escalation::{EscalationJudgeConfig, MAX_REQUEST_CHARS, truncate_middle};
 use super::util::llm_judge::{
     ClassifierInput, JsonSchemaDecoder, JudgeClassifier, JudgePolicy, JudgeRuntimeConfig,
     SerdeDecoder, StructuredJudge,
@@ -49,6 +49,9 @@ const ALGORITHM_NAME: &str = "llm_task_classifier";
 /// the end is what reliably prevents that.
 const TRAILING_ROUTING_INSTRUCTION: &str =
     "Route the conversation above. Output ONLY the routing JSON object, nothing else.";
+
+/// What windowed conversation content may use, leaving room for the trailing instruction.
+const WINDOW_CHARS: usize = MAX_REQUEST_CHARS - TRAILING_ROUTING_INSTRUCTION.len();
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -137,24 +140,99 @@ fn window_start(tail: &[&Message], recent_turn_window: usize) -> usize {
     }
     let mut unpaired: HashSet<&str> = HashSet::new();
     for (start, message) in tail.iter().enumerate().rev() {
-        // Blocks reverse too, so a call answers a result only when it precedes it inside
-        // one message as well as across messages.
-        for block in message.content.iter().rev() {
-            match block {
-                ContentBlock::ToolResult(result) => {
-                    unpaired.insert(result.tool_call_id.as_str());
-                }
-                ContentBlock::ToolCall(call) => {
-                    unpaired.remove(call.id.as_str());
-                }
-                _ => {}
-            }
-        }
+        track_tool_pairs(message, &mut unpaired);
         if start <= counted && unpaired.is_empty() {
             return start;
         }
     }
     counted
+}
+
+/// One step of a newest-to-oldest walk: results wait for a call, calls answer results seen.
+fn track_tool_pairs<'a>(message: &'a Message, unpaired: &mut HashSet<&'a str>) {
+    // Blocks reverse too, so a call answers a result only when it precedes it inside
+    // one message as well as across messages.
+    for block in message.content.iter().rev() {
+        match block {
+            ContentBlock::ToolResult(result) => {
+                unpaired.insert(result.tool_call_id.as_str());
+            }
+            ContentBlock::ToolCall(call) => {
+                unpaired.remove(call.id.as_str());
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Counts text directly and anything else as its JSON, so tool arguments and media count too.
+fn block_chars(block: &ContentBlock) -> usize {
+    match block {
+        ContentBlock::Text { text } => text.chars().count(),
+        ContentBlock::ToolResult(result) => result.content.iter().map(block_chars).sum(),
+        other => serde_json::to_string(other).map_or(0, |json| json.chars().count()),
+    }
+}
+
+/// Shortens blocks over an even share of `limit`. Non-text is replaced: a cut value is invalid.
+fn shorten(content: &mut [ContentBlock], limit: usize) {
+    let share = limit / content.len().max(1);
+    for block in content {
+        match block {
+            _ if block_chars(block) <= share => {}
+            ContentBlock::Text { text } => *text = truncate_middle(text, share),
+            ContentBlock::ToolResult(result) => shorten(&mut result.content, share),
+            // Stays an object because some providers reject any other tool input.
+            ContentBlock::ToolCall(call) => call.arguments = json!({"omitted": "too long"}),
+            other => {
+                *other = ContentBlock::Text {
+                    text: "[content omitted: too long]".to_string(),
+                };
+            }
+        }
+    }
+}
+
+/// Shortens long content, then drops the oldest messages, never the opening task, to fit the cap.
+fn cap_window(mut messages: Vec<Message>) -> Vec<Message> {
+    let size = |message: &Message| message.content.iter().map(block_chars).sum::<usize>();
+    if messages.iter().map(size).sum::<usize>() <= WINDOW_CHARS {
+        return messages;
+    }
+    let pinned = messages
+        .iter()
+        .position(|message| message.role == Role::User)
+        .map_or(messages.len(), |task| task + 1);
+    let share = WINDOW_CHARS / 2 / pinned;
+    for message in &mut messages[..pinned] {
+        shorten(&mut message.content, share);
+        // Each shortened block keeps a minimum size, so many small blocks can still be over.
+        if size(message) > share {
+            let text = message.text_content(" ").unwrap_or_default();
+            *message = Message::text(message.role, text.chars().take(share).collect::<String>());
+        }
+    }
+    let room = WINDOW_CHARS.saturating_sub(messages[..pinned].iter().map(size).sum());
+    let window: Vec<&Message> = messages[pinned..].iter().collect();
+    let newest_group = window.len() - window_start(&window, 1);
+    // Room for the newest tool group and the message before it, unless its calls are many.
+    let limit = room / (newest_group + 1).max(4);
+    for message in &mut messages[pinned..] {
+        shorten(&mut message.content, limit);
+    }
+    let (mut used, mut start, mut unpaired) = (0, messages.len(), HashSet::new());
+    for (index, message) in messages.iter().enumerate().skip(pinned).rev() {
+        used += size(message);
+        if used > room {
+            break;
+        }
+        track_tool_pairs(message, &mut unpaired);
+        if unpaired.is_empty() {
+            start = index;
+        }
+    }
+    messages.drain(pinned..start);
+    messages
 }
 
 /// Keeps the opening task and the latest user follow-up when they differ.
@@ -214,6 +292,9 @@ impl TaskInput {
                 .retain(|block| !matches!(block, ContentBlock::Reasoning { .. }));
         }
         messages.retain(|message| !message.content.is_empty());
+        if self.recent_turn_window.is_some() {
+            messages = cap_window(messages);
+        }
         messages
     }
 }
@@ -2024,6 +2105,544 @@ mod tests {
             Some(TRAILING_ROUTING_INSTRUCTION)
         );
         Ok(())
+    }
+
+    /// A window limits message count and never size, so one large tool result could make the
+    /// judge request fail or cost more than the routing decision is worth. Whatever is cut to
+    /// fit, the instruction stays last and no tool result is left without its call.
+    #[test]
+    fn a_windowed_judge_payload_stays_within_the_fixed_character_cap() {
+        const CAP: usize = 18_000;
+
+        let task = || Message::text(Role::User, "initial task");
+        let call_with_query = |id: &str, chars: usize| {
+            let mut call = tool_call(id);
+            if let ContentBlock::ToolCall(block) = &mut call.content[0] {
+                block.arguments = json!({ "query": "q".repeat(chars) });
+            }
+            call
+        };
+        let filler = || Message::text(Role::Assistant, "f".repeat(3_200));
+        let newest = || Message::text(Role::Assistant, format!("NEWEST{}", "f".repeat(3_194)));
+        let result_with = |id: &str, text: String| {
+            let mut result = tool_result(id);
+            if let ContentBlock::ToolResult(block) = &mut result.content[0] {
+                block.content = vec![ContentBlock::Text { text }];
+            }
+            result
+        };
+        // Filler sits under the size where long content starts being shortened, so these rows
+        // test dropping alone. 16000 chars of it leaves room for the small result next to it
+        // but not for its 3000-char call, so the budget boundary falls between the two.
+        let pair_at_window_start = |result_role: Role| {
+            let mut result = tool_result("boundary");
+            result.role = result_role;
+            let mut messages = vec![task(), call_with_query("boundary", 3_000), result];
+            messages.extend((0..4).map(|_| filler()));
+            messages.push(newest());
+            messages
+        };
+        // The big result is over the room left by the filler and newest message.
+        let parallel_calls_at_window_start = || {
+            let mut calls = tool_call("first");
+            calls.content.extend(tool_call("second").content);
+            let mut messages = vec![
+                task(),
+                calls,
+                result_with("first", "o".repeat(3_000)),
+                tool_result("second"),
+            ];
+            messages.extend((0..4).map(|_| filler()));
+            messages.push(newest());
+            messages
+        };
+        // The first call is over the room, and a later call reuses its id.
+        let repeated_id_at_window_start = || {
+            let mut messages = vec![
+                task(),
+                call_with_query("same", 3_000),
+                result_with("same", "FIRST OUTPUT".to_string()),
+            ];
+            messages.extend((0..5).map(|_| filler()));
+            messages.extend([tool_call("same"), tool_result("same")]);
+            messages
+        };
+        // One message of parallel calls, then one result message for each of them.
+        let parallel_group = |calls: usize, chars: usize| {
+            let ids: Vec<String> = (0..calls).map(|index| format!("call-{index}")).collect();
+            let mut call = tool_call(&ids[0]);
+            call.content = ids.iter().flat_map(|id| tool_call(id).content).collect();
+            let results = ids.iter().map(|id| result_with(id, "o".repeat(chars)));
+            std::iter::once(call).chain(results).collect::<Vec<_>>()
+        };
+        let follow_up_then_group = |ask_chars: usize, calls: usize, chars: usize| {
+            let mut messages = vec![
+                task(),
+                Message::text(Role::Assistant, "ok"),
+                Message::text(
+                    Role::User,
+                    format!("LATEST_USER_ASK{}", "a".repeat(ask_chars)),
+                ),
+            ];
+            messages.extend(parallel_group(calls, chars));
+            messages
+        };
+        // Anthropic clients send all results of one step in one user message.
+        let follow_up_then_results_in_one_message = |calls: usize, chars: usize| {
+            let mut messages = follow_up_then_group(0, calls, chars);
+            let content = messages
+                .drain(4..)
+                .flat_map(|result| result.content)
+                .collect();
+            messages.push(Message {
+                role: Role::User,
+                content,
+            });
+            messages
+        };
+        let task_of = |blocks: Vec<ContentBlock>| {
+            let task = Message {
+                role: Role::User,
+                content: blocks,
+            };
+            vec![task, newest()]
+        };
+        let small_image = || ContentBlock::Image {
+            source: switchyard_protocol::ImageSource::Base64 {
+                media_type: None,
+                data: "b".repeat(100),
+            },
+        };
+        let small_text = || ContentBlock::Text {
+            text: "t".repeat(30),
+        };
+        let result_from_before_the_task = || {
+            let mut messages = vec![tool_call("gone"), task()];
+            messages.extend((0..6).map(|_| filler()));
+            messages.extend([tool_result("gone"), newest()]);
+            messages
+        };
+
+        let cases = [
+            (
+                "a single message larger than the cap is kept, shortened",
+                vec![
+                    Message::text(Role::User, "initial task"),
+                    Message::text(Role::Assistant, format!("HEAD{}TAIL", "x".repeat(39_992))),
+                ],
+                vec!["initial task", "HEAD", "TAIL", "[trimmed]"],
+                vec![],
+            ),
+            (
+                "a tool result leaves with its call at the window start",
+                pair_at_window_start(Role::Tool),
+                vec!["initial task", "NEWEST"],
+                vec!["tool_call search", "tool output"],
+            ),
+            (
+                "a tool result sent with the user role leaves with its call too",
+                pair_at_window_start(Role::User),
+                vec!["initial task", "NEWEST"],
+                vec!["tool_call search", "tool output"],
+            ),
+            (
+                "a multibyte message larger than the cap is cut on character boundaries",
+                vec![task(), Message::text(Role::Assistant, "語".repeat(40_000))],
+                vec!["initial task", "語", "[trimmed]"],
+                vec![],
+            ),
+            (
+                "a tool result larger than the cap stays paired with its call",
+                vec![
+                    task(),
+                    tool_call("big"),
+                    result_with("big", format!("HEAD{}TAIL", "o".repeat(39_992))),
+                ],
+                vec!["tool_call search", "HEAD", "TAIL", "[trimmed]"],
+                vec![],
+            ),
+            (
+                "an opening task larger than the cap leaves room for the window",
+                vec![
+                    Message::text(Role::User, format!("TASK{}", "t".repeat(39_996))),
+                    newest(),
+                ],
+                vec!["TASK", "[trimmed]", "NEWEST"],
+                vec![],
+            ),
+            (
+                "tool call arguments larger than the cap are replaced, keeping the pair",
+                vec![task(), call_with_query("huge", 40_000), tool_result("huge")],
+                vec!["tool_call search", "omitted", "tool output"],
+                vec!["qqq"],
+            ),
+            (
+                "parallel results leave together when the boundary falls between them",
+                parallel_calls_at_window_start(),
+                vec!["initial task", "NEWEST"],
+                vec!["tool_call search", "tool output", "ooo"],
+            ),
+            (
+                "a result does not survive by matching a later call with the same id",
+                repeated_id_at_window_start(),
+                vec!["initial task", "tool_call search", "tool output"],
+                vec!["FIRST OUTPUT", "qqq"],
+            ),
+            (
+                "a result with no reachable call is dropped once over the cap",
+                result_from_before_the_task(),
+                vec!["initial task", "NEWEST"],
+                vec!["tool output"],
+            ),
+            (
+                "a large newest message leaves room for three older ones",
+                vec![
+                    task(),
+                    Message::text(Role::Assistant, format!("OLDEST{}", "f".repeat(4_000))),
+                    Message::text(Role::Assistant, "f".repeat(4_000)),
+                    Message::text(Role::Assistant, "f".repeat(4_000)),
+                    Message::text(Role::Assistant, format!("NEWEST{}", "f".repeat(40_000))),
+                ],
+                vec!["OLDEST", "NEWEST", "[trimmed]"],
+                vec![],
+            ),
+            (
+                "a follow-up survives three parallel results that only fit shortened",
+                follow_up_then_group(0, 3, 6_000),
+                vec!["LATEST_USER_ASK", "tool_call search", "[trimmed]"],
+                vec![],
+            ),
+            (
+                "a follow-up survives four parallel results just over the cap",
+                follow_up_then_group(0, 4, 5_000),
+                vec!["LATEST_USER_ASK", "tool_call search", "[trimmed]"],
+                vec![],
+            ),
+            (
+                "a follow-up survives five parallel results just over the cap",
+                follow_up_then_group(0, 5, 3_700),
+                vec!["LATEST_USER_ASK", "tool_call search", "[trimmed]"],
+                vec![],
+            ),
+            (
+                "a follow-up survives six parallel results that exactly fill the cap",
+                follow_up_then_group(0, 6, 3_000),
+                vec!["LATEST_USER_ASK", "tool_call search", "[trimmed]"],
+                vec![],
+            ),
+            (
+                "a long follow-up survives eight parallel results",
+                follow_up_then_group(6_000, 8, 2_300),
+                vec!["LATEST_USER_ASK", "tool_call search", "[trimmed]"],
+                vec![],
+            ),
+            (
+                "a follow-up survives four large results in one message",
+                follow_up_then_results_in_one_message(4, 40_000),
+                vec!["LATEST_USER_ASK", "tool_call search", "[trimmed]"],
+                vec![],
+            ),
+            (
+                "parallel results far over the cap still fit once shortened",
+                [vec![task()], parallel_group(8, 40_000)].concat(),
+                vec!["initial task", "tool_call search", "[trimmed]"],
+                vec![],
+            ),
+            (
+                "a tool group that cannot fit even shortened leaves the task alone",
+                [vec![task()], parallel_group(2_000, 40)].concat(),
+                vec!["initial task"],
+                vec!["tool_call search", "tool output"],
+            ),
+            (
+                "an opening task of many small text blocks is bound and leaves room",
+                task_of((0..2_000).map(|_| small_text()).collect()),
+                vec!["ttt", "NEWEST"],
+                vec![],
+            ),
+            (
+                "an opening task of many small images is bound and leaves room",
+                task_of((0..1_000).map(|_| small_image()).collect()),
+                vec!["content omitted", "NEWEST"],
+                vec![],
+            ),
+            (
+                "with no user message every message is bound",
+                vec![
+                    Message::text(Role::System, "s".repeat(40_000)),
+                    Message::text(Role::Developer, "d".repeat(40_000)),
+                ],
+                vec!["sss", "ddd", "[trimmed]"],
+                vec![],
+            ),
+        ];
+
+        // Every row reports, so one failure does not hide the others.
+        let mut failures = Vec::new();
+        for (name, messages, kept, dropped) in cases {
+            let request = Request {
+                llm_request: LlmRequest {
+                    messages,
+                    ..LlmRequest::default()
+                },
+                ..Request::default()
+            };
+            let built = TaskInput {
+                recent_turn_window: Some(10),
+            }
+            .build_messages(&State::default(), &request);
+
+            let visible: Vec<String> = built
+                .iter()
+                .map(crate::algorithms::util::transcript::message_text)
+                .collect();
+            let chars: usize = visible.iter().map(|text| text.chars().count()).sum();
+            if chars > CAP {
+                failures.push(format!("{name}: {chars} chars is over the {CAP} cap"));
+            }
+            if built.last() != Some(&Message::text(Role::User, TRAILING_ROUTING_INSTRUCTION)) {
+                failures.push(format!("{name}: routing instruction is not last and whole"));
+            }
+            let text = visible.join("\n");
+            for wanted in kept {
+                if !text.contains(wanted) {
+                    failures.push(format!("{name}: {wanted:?} should have been kept"));
+                }
+            }
+            for unwanted in dropped {
+                if text.contains(unwanted) {
+                    failures.push(format!("{name}: {unwanted:?} should have been dropped"));
+                }
+            }
+            let mut introduced = HashSet::new();
+            for block in built.iter().flat_map(|message| &message.content) {
+                match block {
+                    ContentBlock::ToolCall(call) => {
+                        introduced.insert(call.id.as_str());
+                        if !call.arguments.is_object() && !call.arguments.is_null() {
+                            failures.push(format!("{name}: arguments are not an object"));
+                        }
+                    }
+                    ContentBlock::ToolResult(result)
+                        if !introduced.contains(result.tool_call_id.as_str()) =>
+                    {
+                        failures.push(format!(
+                            "{name}: result {} has no earlier call",
+                            result.tool_call_id
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    fn request_with(messages: Vec<Message>) -> Request {
+        Request {
+            llm_request: LlmRequest {
+                messages,
+                ..LlmRequest::default()
+            },
+            ..Request::default()
+        }
+    }
+
+    /// The first window message's size when the whole request is exactly 18000 characters: the
+    /// opening task is 12 and four newer messages are 4000 each.
+    fn at_the_cap_chars() -> usize {
+        18_000 - TRAILING_ROUTING_INSTRUCTION.len() - 12 - 16_000
+    }
+
+    /// Content within the cap reaches the judge exactly as it did before the cap existed, and
+    /// the default path has no cap at all.
+    #[test]
+    fn judge_content_the_cap_should_not_touch_is_unchanged() {
+        let reasoning = ContentBlock::Reasoning {
+            text: "r".repeat(40_000),
+            signature: None,
+            details: Vec::new(),
+        };
+        let at_the_cap = vec![
+            Message::text(Role::User, "initial task"),
+            Message::text(Role::Assistant, "o".repeat(at_the_cap_chars())),
+            Message::text(Role::Assistant, "f".repeat(4_000)),
+            Message::text(Role::Assistant, "f".repeat(4_000)),
+            Message::text(Role::Assistant, "f".repeat(4_000)),
+            Message::text(Role::Assistant, "f".repeat(4_000)),
+        ];
+        let whole_request = TaskInput {
+            recent_turn_window: Some(10),
+        }
+        .build_messages(&State::default(), &request_with(at_the_cap.clone()));
+        let whole_request_chars: usize = whole_request
+            .iter()
+            .map(|message| {
+                message
+                    .text_content("")
+                    .map_or(0, |text| text.chars().count())
+            })
+            .sum();
+        assert_eq!(whole_request_chars, 18_000);
+
+        let cases = [
+            ("under the cap", Some(10), None, at_the_cap[..2].to_vec()),
+            ("exactly at the cap", Some(10), None, at_the_cap),
+            (
+                "the default path at any size",
+                None,
+                None,
+                vec![Message::text(Role::User, "t".repeat(40_000))],
+            ),
+            (
+                "reasoning does not count against the cap",
+                Some(10),
+                Some(reasoning),
+                vec![
+                    Message::text(Role::User, "initial task"),
+                    Message::text(Role::Assistant, "visible"),
+                ],
+            ),
+        ];
+
+        for (name, recent_turn_window, extra_block, expected) in cases {
+            let mut messages = expected.clone();
+            let newest = messages.last_mut().expect("rows hold messages");
+            newest.content.extend(extra_block);
+            let actual = TaskInput { recent_turn_window }.messages(&request_with(messages));
+            assert!(actual == expected, "{name}");
+        }
+    }
+
+    /// One character over drops the oldest message whole, and leaves the rest untouched.
+    #[test]
+    fn one_character_over_the_cap_drops_the_oldest_window_message() {
+        let newer: Vec<Message> = (0..4)
+            .map(|_| Message::text(Role::Assistant, "f".repeat(4_000)))
+            .collect();
+        let mut messages = vec![
+            Message::text(Role::User, "initial task"),
+            Message::text(Role::Assistant, "o".repeat(at_the_cap_chars() + 1)),
+        ];
+        messages.extend(newer.iter().cloned());
+        let actual = TaskInput {
+            recent_turn_window: Some(10),
+        }
+        .messages(&request_with(messages));
+
+        assert_eq!(actual[0], Message::text(Role::User, "initial task"));
+        assert_eq!(actual[1..], newer[..]);
+    }
+
+    /// The bound holds on the request the judge model is actually sent.
+    #[test]
+    fn a_structured_judge_request_stays_within_the_cap() -> Result<()> {
+        let judge = capability_judge(Some(10))?;
+        let request = request_with(vec![
+            Message::text(Role::User, "initial task"),
+            Message::text(Role::Assistant, "x".repeat(40_000)),
+        ]);
+        let messages = judge
+            .build_request(&State::default(), &request)
+            .llm_request
+            .messages;
+
+        let chars: usize = messages
+            .iter()
+            .map(|message| {
+                message
+                    .text_content("")
+                    .map_or(0, |text| text.chars().count())
+            })
+            .sum();
+        assert!(chars <= 18_000, "{chars}");
+        assert_eq!(
+            messages.last(),
+            Some(&Message::text(Role::User, TRAILING_ROUTING_INSTRUCTION))
+        );
+        Ok(())
+    }
+
+    /// Every judge reads `messages`, so the bound holds without the trailing instruction too.
+    /// A zero window has a task to shorten, and media cannot be cut in place.
+    #[test]
+    fn windowed_messages_stay_within_the_cap_before_the_instruction() {
+        let image = ContentBlock::Image {
+            source: switchyard_protocol::ImageSource::Base64 {
+                media_type: None,
+                data: "b".repeat(40_000),
+            },
+        };
+        let cases = [
+            (
+                "the decision judge input is capped",
+                Some(10),
+                vec![
+                    Message::text(Role::User, "initial task"),
+                    Message::text(Role::Assistant, "x".repeat(40_000)),
+                ],
+                "[trimmed]",
+            ),
+            (
+                "a zero window shortens the task",
+                Some(0),
+                vec![Message::text(Role::User, "t".repeat(40_000))],
+                "[trimmed]",
+            ),
+            (
+                "a large image is replaced by a short note",
+                Some(10),
+                vec![
+                    Message::text(Role::User, "initial task"),
+                    Message {
+                        role: Role::Assistant,
+                        content: vec![
+                            image,
+                            ContentBlock::Text {
+                                text: "short".to_string(),
+                            },
+                        ],
+                    },
+                ],
+                "[content omitted: too long]",
+            ),
+            (
+                "an opening message of only tool results, too many to fit, becomes empty text",
+                Some(10),
+                vec![Message {
+                    role: Role::User,
+                    content: (0..2_000)
+                        .flat_map(|_| tool_result("gone").content)
+                        .collect(),
+                }],
+                r#"{"role":"user","content":[{"type":"text","text":""}]}"#,
+            ),
+        ];
+
+        for (name, recent_turn_window, messages, marker) in cases {
+            let actual = TaskInput { recent_turn_window }.messages(&request_with(messages));
+
+            let text: String = actual
+                .iter()
+                .map(crate::algorithms::util::transcript::message_text)
+                .collect();
+            assert!(text.chars().count() <= 18_000, "{name}");
+            // Serialized so a row can pin an empty block, which has no text to search for.
+            let json = serde_json::to_string(&actual).expect("messages serialize");
+            assert!(json.contains(marker), "{name}: {json}");
+            assert!(
+                !actual
+                    .iter()
+                    .flat_map(|message| &message.content)
+                    .any(|block| matches!(block, ContentBlock::Image { .. })),
+                "{name}"
+            );
+            assert_ne!(
+                actual.last(),
+                Some(&Message::text(Role::User, TRAILING_ROUTING_INSTRUCTION)),
+                "{name}"
+            );
+        }
     }
 
     /// Reasoning is provider-private and some upstreams reject it replayed without the
