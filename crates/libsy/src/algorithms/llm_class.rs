@@ -2046,6 +2046,14 @@ mod tests {
             ("single block", None, vec![u(&single)], vec![u("real q")]),
             ("multiple blocks", None, vec![u(&all)], vec![u("real q")]),
             (
+                "multi-line block",
+                None,
+                vec![u(
+                    "<system-reminder>\nline one\nline two\n</system-reminder>\nreal q",
+                )],
+                vec![u("real q")],
+            ),
+            (
                 "block after the question",
                 None,
                 vec![u(&format!("real q\n{M}"))],
@@ -2138,6 +2146,17 @@ mod tests {
                 "window skips a hook-only opening",
                 Some(5),
                 vec![u(R), Message::text(Role::Assistant, "ok"), u("real q")],
+                vec![u("real q")],
+            ),
+            (
+                "window skips a tool result with a reminder before the task",
+                Some(5),
+                vec![
+                    u(R),
+                    tool_call("call-1"),
+                    tool_reminder.clone(),
+                    u("real q"),
+                ],
                 vec![u("real q")],
             ),
             (
