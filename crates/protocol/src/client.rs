@@ -135,6 +135,8 @@ pub enum RoutingFallbackReason {
     ContextWindow,
     /// The selected target was unavailable after its client retries finished.
     Unavailable,
+    /// The selected target rejected the request as something it cannot serve at all.
+    Capability,
 }
 
 impl RoutingFallbackReason {
@@ -143,6 +145,7 @@ impl RoutingFallbackReason {
         match self {
             Self::ContextWindow => "context_window",
             Self::Unavailable => "unavailable",
+            Self::Capability => "capability",
         }
     }
 }
