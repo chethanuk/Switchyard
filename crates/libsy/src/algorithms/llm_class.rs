@@ -2066,6 +2066,12 @@ mod tests {
                 vec![u("open"), u("real q")],
             ),
             (
+                "hook-only follow-up with two blocks keeps the latest question",
+                None,
+                vec![u("open"), u("real q"), u(&format!("{R}\n{M}"))],
+                vec![u("open"), u("real q")],
+            ),
+            (
                 "tool result with reminder keeps the latest question",
                 None,
                 vec![
