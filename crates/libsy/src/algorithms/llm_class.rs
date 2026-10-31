@@ -3,10 +3,12 @@
 
 //! Judge-backed capability, escalation, and custom-policy routing.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use async_trait::async_trait;
+use regex::Regex;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use switchyard_protocol::{Category, ContentBlock, Message, Role};
@@ -92,6 +94,43 @@ impl TaskClassifierVerdict {
     }
 }
 
+/// Complete context blocks that agent hooks add to user messages. An unclosed tag does
+/// not match, because the end of the block is unknown and the question may follow it.
+static INJECTED_BLOCKS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"(?s)<system-reminder>.*?</system-reminder>",
+        r"|<hindsight_memories>.*?</hindsight_memories>",
+        r"|<hindsight_recall_query_rewrite>.*?</hindsight_recall_query_rewrite>",
+        r"|<hindsight_chunks>.*?</hindsight_chunks>",
+    ))
+    .expect("valid injected block pattern")
+});
+
+/// Removes complete blocks. A lazy match starts at the first opener, so anything before the
+/// last opener in the match is text around a stray tag, and it stays.
+fn strip_injected(text: &str) -> Cow<'_, str> {
+    INJECTED_BLOCKS.replace_all(text, |caps: &regex::Captures<'_>| {
+        let block = &caps[0];
+        let opener = &block[..=block.find('>').unwrap_or(0)];
+        block[..block.rfind(opener).unwrap_or(0)].to_string()
+    })
+}
+
+/// True for a text block that holds injected blocks and nothing else.
+fn is_injected_text(block: &ContentBlock) -> bool {
+    matches!(block, ContentBlock::Text { text } if matches!(
+        strip_injected(text),
+        Cow::Owned(rest) if rest.trim().is_empty()
+    ))
+}
+
+/// True for a user message that holds injected blocks and nothing else.
+fn is_injected_only(message: &Message) -> bool {
+    message.role == Role::User
+        && !message.content.is_empty()
+        && message.content.iter().all(is_injected_text)
+}
+
 /// Keeps the opening task and the last `recent_turn_window` turns after it. A
 /// window of `0` keeps the task alone.
 ///
@@ -104,14 +143,22 @@ impl TaskClassifierVerdict {
 fn trim_messages(messages: &[Message], recent_turn_window: usize) -> Vec<Message> {
     let is_instruction = |message: &Message| matches!(message.role, Role::System | Role::Developer);
     let mut kept: Vec<&Message> = messages.iter().filter(|m| is_instruction(m)).collect();
-    let Some(task) = messages.iter().position(is_user_turn) else {
+    // A tool result that arrives with a reminder is still not a task.
+    let is_task = |message: &Message| {
+        is_user_turn(message)
+            && message
+                .content
+                .iter()
+                .any(|b| !matches!(b, ContentBlock::ToolResult(_)) && !is_injected_text(b))
+    };
+    let Some(task) = messages.iter().position(is_task) else {
         return kept.into_iter().cloned().collect();
     };
     kept.push(&messages[task]);
 
     let tail: Vec<&Message> = messages[task + 1..]
         .iter()
-        .filter(|m| !is_instruction(m))
+        .filter(|m| !is_instruction(m) && !is_injected_only(m))
         .collect();
     kept.extend(&tail[window_start(&tail, recent_turn_window)..]);
     kept.into_iter().cloned().collect()
@@ -167,7 +214,7 @@ fn task_messages(messages: &[Message]) -> Vec<Message> {
             ContentBlock::ToolCall(_)
                 | ContentBlock::ToolResult(_)
                 | ContentBlock::Reasoning { .. }
-        )
+        ) && !is_injected_text(block)
     };
     let mut user_messages = messages
         .iter()
@@ -213,7 +260,29 @@ impl TaskInput {
                 .content
                 .retain(|block| !matches!(block, ContentBlock::Reasoning { .. }));
         }
+        // Hook text routes the judge on the hook's words. Only the judge's copy changes.
+        for message in messages.iter_mut().filter(|m| m.role == Role::User) {
+            message.content.retain_mut(|block| {
+                let ContentBlock::Text { text } = block else {
+                    return true;
+                };
+                let Cow::Owned(rest) = strip_injected(text) else {
+                    return true;
+                };
+                *text = rest.trim().to_string();
+                !text.is_empty()
+            });
+        }
         messages.retain(|message| !message.content.is_empty());
+        // With no other user text, the injected text is the only task the judge can read.
+        if !messages.iter().any(|message| message.role == Role::User) {
+            let first = request
+                .llm_request
+                .messages
+                .iter()
+                .find(|m| is_injected_only(m));
+            messages.extend(first.cloned());
+        }
         messages
     }
 }
@@ -1940,6 +2009,203 @@ mod tests {
         );
         request.llm_request.messages = vec![result];
         assert!(input.build_messages(&State::default(), &request).is_empty());
+    }
+
+    #[test]
+    fn judge_reads_the_question_without_injected_context() {
+        const R: &str = "<system-reminder>project rules</system-reminder>";
+        const M: &str = "<hindsight_memories>old question</hindsight_memories>";
+        const Q: &str = "<hindsight_recall_query_rewrite>rewrite</hindsight_recall_query_rewrite>";
+        const C: &str = "<hindsight_chunks>earlier words</hindsight_chunks>";
+        let u = |text: &str| Message::text(Role::User, text);
+        let tool_reminder = {
+            let mut m = tool_result("call-1");
+            m.role = Role::User;
+            m.content.push(ContentBlock::Text {
+                text: R.to_string(),
+            });
+            m
+        };
+        let tool_only = {
+            let mut m = tool_result("call-1");
+            m.role = Role::User;
+            m
+        };
+        let all = format!("{R}\n{M}\n{Q}\n{C}\nreal q");
+        let single = format!("{R} real q");
+        let cases = vec![
+            ("single block", None, vec![u(&single)], vec![u("real q")]),
+            ("multiple blocks", None, vec![u(&all)], vec![u("real q")]),
+            (
+                "block after the question",
+                None,
+                vec![u(&format!("real q\n{M}"))],
+                vec![u("real q")],
+            ),
+            (
+                "hook-only follow-up keeps the latest question",
+                None,
+                vec![u("open"), u("real q"), u(R)],
+                vec![u("open"), u("real q")],
+            ),
+            (
+                "tool result with reminder keeps the latest question",
+                None,
+                vec![
+                    u("open"),
+                    u("real q"),
+                    tool_call("call-1"),
+                    tool_reminder.clone(),
+                ],
+                vec![u("open"), u("real q")],
+            ),
+            (
+                "hook-only opening with a real message after it",
+                None,
+                vec![u(R), u("real 1"), u("real 2")],
+                vec![u("real 1"), u("real 2")],
+            ),
+            (
+                "only hook text keeps the first message",
+                None,
+                vec![u(R), u(M)],
+                vec![u(R)],
+            ),
+            (
+                "unclosed tag unchanged",
+                None,
+                vec![u("see <system-reminder> tag")],
+                vec![u("see <system-reminder> tag")],
+            ),
+            (
+                "close without open unchanged",
+                None,
+                vec![u("a </system-reminder> b")],
+                vec![u("a </system-reminder> b")],
+            ),
+            (
+                "tag with attribute unchanged",
+                None,
+                vec![u("<system-reminder id=\"1\">x</system-reminder>")],
+                vec![u("<system-reminder id=\"1\">x</system-reminder>")],
+            ),
+            (
+                "tagless text byte identical",
+                None,
+                vec![u("  a <b>c</b> \n")],
+                vec![u("  a <b>c</b> \n")],
+            ),
+            (
+                "whitespace follow-up keeps today's behaviour",
+                None,
+                vec![u("open"), u("  ")],
+                vec![u("open"), u("  ")],
+            ),
+            (
+                "window drops a hook-only turn",
+                Some(5),
+                vec![u("open"), u(R)],
+                vec![u("open")],
+            ),
+            (
+                "window strips a mixed turn",
+                Some(5),
+                vec![u("open"), u(&single)],
+                vec![u("open"), u("real q")],
+            ),
+            (
+                "window keeps a tool pair and drops its reminder",
+                Some(5),
+                vec![u("open"), tool_call("call-1"), tool_reminder.clone()],
+                vec![u("open"), tool_call("call-1"), tool_only.clone()],
+            ),
+            (
+                "window does not count hook-only turns",
+                Some(1),
+                vec![u("open"), u("real q"), u(R), u(M)],
+                vec![u("open"), u("real q")],
+            ),
+            (
+                "window skips a hook-only opening",
+                Some(5),
+                vec![u(R), Message::text(Role::Assistant, "ok"), u("real q")],
+                vec![u("real q")],
+            ),
+            (
+                "window with only hook text keeps the first message",
+                Some(5),
+                vec![u(R), u(M)],
+                vec![u(R)],
+            ),
+            (
+                "stray opener in prose keeps the whole question",
+                None,
+                vec![u(&format!(
+                    "how do I parse a stray <system-reminder> tag in my code? please fix parser.rs\n{R}"
+                ))],
+                vec![u(
+                    "how do I parse a stray <system-reminder> tag in my code? please fix parser.rs",
+                )],
+            ),
+            (
+                "stray opener at the start keeps the question",
+                None,
+                vec![u(
+                    "<system-reminder>x real q <system-reminder>y</system-reminder>",
+                )],
+                vec![u("<system-reminder>x real q")],
+            ),
+            (
+                "separate text blocks drop only the hook block",
+                None,
+                vec![Message {
+                    role: Role::User,
+                    content: vec![
+                        ContentBlock::Text {
+                            text: R.to_string(),
+                        },
+                        ContentBlock::Text {
+                            text: "real q".to_string(),
+                        },
+                    ],
+                }],
+                vec![u("real q")],
+            ),
+            (
+                "window drops a hook turn between assistants",
+                Some(5),
+                vec![
+                    u("open"),
+                    Message::text(Role::Assistant, "a1"),
+                    u(R),
+                    Message::text(Role::Assistant, "a2"),
+                ],
+                vec![
+                    u("open"),
+                    Message::text(Role::Assistant, "a1"),
+                    Message::text(Role::Assistant, "a2"),
+                ],
+            ),
+            (
+                "assistant text is not stripped",
+                Some(5),
+                vec![u("open"), Message::text(Role::Assistant, R)],
+                vec![u("open"), Message::text(Role::Assistant, R)],
+            ),
+        ];
+        let mut failed = Vec::new();
+        for (name, window, messages, want) in cases {
+            let mut request = Request::default();
+            request.llm_request.messages = messages;
+            let got = TaskInput {
+                recent_turn_window: window,
+            }
+            .messages(&request);
+            if got != want {
+                failed.push(name);
+            }
+        }
+        assert!(failed.is_empty(), "rows failed: {failed:?}");
     }
 
     /// A count-based window can begin on a tool result, which leaves the call that
