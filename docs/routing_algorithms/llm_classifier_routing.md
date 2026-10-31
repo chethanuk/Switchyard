@@ -244,6 +244,8 @@ blocks. A message with only these blocks is not used as the task or the latest
 follow-up, and does not count toward `recent_turn_window`. If no user message has
 other text, the judge sees the first such message unchanged. The selected model
 still receives the full request. Unclosed tags and tags with attributes stay.
+A complete block that a user quotes in their own text is also left out. Nested
+blocks with the same tag are only partly removed.
 If a client sends only a follow-up fragment without the opening task, enable
 affinity or include the task history. Threshold tuning changes routing policy;
 it cannot recover missing task context.

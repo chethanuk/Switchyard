@@ -1033,6 +1033,7 @@ mod tests {
         call_roles: Mutex<Vec<(String, bool)>>,
         judge_max_output_tokens: Mutex<Vec<Option<u64>>>,
         judge_system_prompts: Mutex<Vec<String>>,
+        messages_sent: Mutex<Vec<Vec<Message>>>,
     }
 
     impl Recorder {
@@ -1052,6 +1053,10 @@ mod tests {
             self.judge_system_prompts.lock().clone()
         }
 
+        fn messages_sent(&self) -> Vec<Vec<Message>> {
+            self.messages_sent.lock().clone()
+        }
+
         fn serve(self: &Arc<Self>) -> impl Serve {
             let recorder = Arc::clone(self);
             move |model: ModelId, request: Request| {
@@ -1059,6 +1064,10 @@ mod tests {
                 async move {
                     let model = model.to_string();
                     recorder.calls.lock().push(model.clone());
+                    recorder
+                        .messages_sent
+                        .lock()
+                        .push(request.llm_request.messages.clone());
                     recorder
                         .call_roles
                         .lock()
@@ -2011,8 +2020,8 @@ mod tests {
         assert!(input.build_messages(&State::default(), &request).is_empty());
     }
 
-    #[test]
-    fn judge_reads_the_question_without_injected_context() {
+    #[tokio::test]
+    async fn judge_reads_the_question_without_injected_context() -> Result<()> {
         const R: &str = "<system-reminder>project rules</system-reminder>";
         const M: &str = "<hindsight_memories>old question</hindsight_memories>";
         const Q: &str = "<hindsight_recall_query_rewrite>rewrite</hindsight_recall_query_rewrite>";
@@ -2156,6 +2165,14 @@ mod tests {
                 vec![u("<system-reminder>x real q")],
             ),
             (
+                "nested same-tag blocks leave the outer tags and text",
+                None,
+                vec![u(
+                    "<system-reminder>A <system-reminder>B</system-reminder> C </system-reminder> real q",
+                )],
+                vec![u("<system-reminder>A  C </system-reminder> real q")],
+            ),
+            (
                 "separate text blocks drop only the hook block",
                 None,
                 vec![Message {
@@ -2193,19 +2210,29 @@ mod tests {
                 vec![u("open"), Message::text(Role::Assistant, R)],
             ),
         ];
-        let mut failed = Vec::new();
-        for (name, window, messages, want) in cases {
-            let mut request = Request::default();
-            request.llm_request.messages = messages;
-            let got = TaskInput {
-                recent_turn_window: window,
+        for (name, window, messages, mut want) in cases {
+            if window.is_some() {
+                want.push(u(TRAILING_ROUTING_INSTRUCTION));
             }
-            .messages(&request);
-            if got != want {
-                failed.push(name);
-            }
+            let recorder = Arc::new(Recorder::default());
+            let router = Arc::new(LlmTaskClassifier::new(LlmClassifierConfig::Capability {
+                config: TaskClassifierConfig {
+                    recent_turn_window: window,
+                    ..test_config(TEST_THRESHOLD)
+                },
+            })?);
+            let mut request = classify_request();
+            request.llm_request.messages = messages.clone();
+
+            test_drive_with_models(router, request, runtime_models(), recorder.serve()).await?;
+
+            assert_eq!(recorder.calls(), vec!["judge", "efficient"], "{name}");
+            assert_eq!(recorder.judge_system_prompts().len(), 1, "{name}");
+            let sent = recorder.messages_sent();
+            assert_eq!(sent[0], want, "judge copy: {name}");
+            assert_eq!(sent[1], messages, "answer request: {name}");
         }
-        assert!(failed.is_empty(), "rows failed: {failed:?}");
+        Ok(())
     }
 
     /// A count-based window can begin on a tool result, which leaves the call that
