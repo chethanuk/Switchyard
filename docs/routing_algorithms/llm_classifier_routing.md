@@ -238,6 +238,16 @@ opening task and the latest user follow-up when they differ, excluding tool call
 tool results, and reasoning. It keeps ordinary user content from messages that
 also contain tool results. Set `recent_turn_window` when intervening conversation
 context affects the forecast.
+The judge's copy of user messages also leaves out complete `<system-reminder>`,
+`<hindsight_memories>`, `<hindsight_recall_query_rewrite>`, and `<hindsight_chunks>`
+blocks. A message with only these blocks is not used as the task or the latest
+follow-up, and does not count toward `recent_turn_window`. If no user message has
+other text, the judge sees the first such message unchanged. The selected model
+still receives the full request. Unclosed tags and tags with attributes stay.
+A complete block that a user quotes in their own text is also left out. Blocks
+that quote their own tag, including nested blocks with the same tag, are only
+partly removed. Blocks inside tool results stay, so they reach a judge that has
+`recent_turn_window` set.
 If a client sends only a follow-up fragment without the opening task, enable
 affinity or include the task history. Threshold tuning changes routing policy;
 it cannot recover missing task context.
