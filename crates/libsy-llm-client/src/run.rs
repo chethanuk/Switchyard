@@ -37,6 +37,7 @@ use switchyard_protocol::{
 };
 use switchyard_translation::prepare_request_for_target;
 
+use crate::error::is_overflow_body;
 use crate::observation::{ModelCallObservation, RunObservation, RunObserver};
 use crate::{metrics, observability};
 
@@ -518,6 +519,15 @@ async fn buffer_routing_stream(
     Ok((stream::iter(events.into_iter().map(Ok)).boxed(), usage))
 }
 
+// Upstream wording for "this model cannot take this input at all". Kept narrow:
+// a miss keeps today's error, a false positive moves the request to another target.
+const CAPABILITY_PHRASES: &[&str] = &[
+    "does not support image input",                  // Fireworks, Moonshot
+    "is not a multimodal model",                     // vLLM; the model name prefix varies
+    "image input is not supported",                  // llama.cpp wording, when a proxy answers 400
+    "image_url is only supported by certain models", // OpenAI
+];
+
 /// Whether a failed candidate is worth routing around.
 fn fallback_reason(
     error: &LibsyError,
@@ -537,6 +547,13 @@ fn fallback_reason(
             });
             if policy_denial && !allow_policy_fallback {
                 return None;
+            }
+            // Reuses the overflow helper's message parsing with non-overflow phrases.
+            if *status == StatusCode::BAD_REQUEST
+                && !policy_denial
+                && is_overflow_body(body, |_| false, CAPABILITY_PHRASES)
+            {
+                return Some(RoutingFallbackReason::Capability);
             }
             ((*status == StatusCode::BAD_REQUEST && policy_denial)
                 || matches!(
@@ -1211,6 +1228,7 @@ mod tests {
         ContextWindow,
         ContentPolicy(StatusCode),
         Unauthorized,
+        BadRequest(&'static str),
         StreamSuccess,
         MidStreamError,
     }
@@ -1240,6 +1258,10 @@ mod tests {
                     FirstOutcome::Unauthorized => Err(LlmClientError::UpstreamHttp {
                         status: StatusCode::UNAUTHORIZED,
                         body: "unauthorized".to_string(),
+                    }),
+                    FirstOutcome::BadRequest(body) => Err(LlmClientError::UpstreamHttp {
+                        status: StatusCode::BAD_REQUEST,
+                        body: body.to_string(),
                     }),
                     FirstOutcome::StreamSuccess => Ok(stream_response(vec![
                         LlmResponseChunk::TextDelta {
@@ -2475,9 +2497,13 @@ mod tests {
         Ok(())
     }
 
+    const IMAGE_REJECT: &str = r#"{"error":{"type":"invalid_request_error","message":"This model does not support image inputs"}}"#;
+
     #[test]
     fn fallback_only_accepts_context_policy_and_unavailable_failures() {
         let error = |source| LibsyError::client_call("target", source);
+        let capability = Some(RoutingFallbackReason::Capability);
+        assert_eq!(RoutingFallbackReason::Capability.as_str(), "capability");
         assert_eq!(
             fallback_reason(
                 &error(LlmClientError::ContextWindowExceeded {
@@ -2517,6 +2543,56 @@ mod tests {
             ),
             (r#"{"error":{"message":"content_policy_violation"}}"#, None),
             ("content_policy_violation", None),
+            (IMAGE_REJECT, capability),
+            (
+                r#"{"error":{"message":"judge is not a multimodal model","type":"BadRequestError","code":400}}"#,
+                capability,
+            ),
+            (
+                r#"{"error":{"message":"image input is not supported - hint: provide the mmproj"}}"#,
+                capability,
+            ),
+            (
+                r#"{"error":{"message":"Invalid content type. image_url is only supported by certain models."}}"#,
+                capability,
+            ),
+            (
+                r#"{"object":"error","message":"m is not a multimodal model"}"#,
+                capability,
+            ),
+            ("This model does not support image inputs", capability),
+            (
+                r#"{"error":{"message":"THIS MODEL DOES NOT SUPPORT IMAGE INPUT"}}"#,
+                capability,
+            ),
+            (
+                r#"{"error":{"code":"invalid_request_error","message":"does not support image input"}}"#,
+                capability,
+            ),
+            (r#"{"error":{"message":"invalid image data"}}"#, None),
+            (
+                r#"{"error":{"message":"This model does not support images larger than 20MB"}}"#,
+                None,
+            ),
+            (
+                r#"{"error":{"message":"does not support image generation"}}"#,
+                None,
+            ),
+            (r#"{"error":{"message":"image too large"}}"#, None),
+            (
+                r#"{"error":{"message":"Multimodal processing failed"}}"#,
+                None,
+            ),
+            (r#"{"error":{"message":"bad request"}}"#, None),
+            (
+                r#"{"error":{"message":"response_format json_schema is not supported"}}"#,
+                None,
+            ),
+            (
+                r#"{"error":{"message":"rejected"},"metadata":"does not support image input"}"#,
+                None,
+            ),
+            (r#"{"message":"does not support image input"}"#, None),
         ] {
             assert_eq!(
                 fallback_reason(
@@ -2549,6 +2625,39 @@ mod tests {
                 None
             );
         }
+
+        let mmproj =
+            r#"{"error":{"message":"image input is not supported - hint: provide the mmproj"}}"#;
+        let policy = r#"{"error":{"code":"content_policy_violation","message":"does not support image input"}}"#;
+        let unavailable = Some(RoutingFallbackReason::Unavailable);
+        for (status, body, allow_policy_fallback, expected) in [
+            (401, IMAGE_REJECT, true, None),
+            (404, IMAGE_REJECT, true, None),
+            (422, IMAGE_REJECT, true, None),
+            (403, IMAGE_REJECT, true, unavailable),
+            (408, IMAGE_REJECT, true, unavailable),
+            (429, IMAGE_REJECT, true, unavailable),
+            (500, IMAGE_REJECT, true, unavailable),
+            (503, IMAGE_REJECT, true, unavailable),
+            (500, mmproj, true, unavailable),
+            // A policy denial keeps its own result even when the message also matches.
+            (400, policy, true, unavailable),
+            (400, policy, false, None),
+            // The next candidate serves the arrived request, so the flag does not apply.
+            (400, IMAGE_REJECT, false, capability),
+        ] {
+            assert_eq!(
+                fallback_reason(
+                    &error(LlmClientError::UpstreamHttp {
+                        status: StatusCode::from_u16(status).expect("valid status"),
+                        body: body.to_string(),
+                    }),
+                    allow_policy_fallback,
+                ),
+                expected,
+                "{status} {body} {allow_policy_fallback}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2578,6 +2687,29 @@ mod tests {
             &[ModelId::from("weak"), "strong".into()]
         );
         assert_eq!(response.served_model().map(ModelId::as_str), Some("strong"));
+
+        // A model that cannot take the input at all also permits another candidate.
+        let (client, result) = run_candidates(FirstOutcome::BadRequest(IMAGE_REJECT)).await;
+        let (_, response) = result?;
+        assert_eq!(
+            &*client.calls.lock(),
+            &[ModelId::from("weak"), "strong".into()]
+        );
+        assert_eq!(response.served_model().map(ModelId::as_str), Some("strong"));
+
+        // Any other 400 stays terminal, so the second candidate is untouched.
+        let (client, result) = run_candidates(FirstOutcome::BadRequest("failed")).await;
+        assert!(matches!(
+            result,
+            Err(LibsyError::ClientCall {
+                source: LlmClientError::UpstreamHttp {
+                    status: StatusCode::BAD_REQUEST,
+                    ..
+                },
+                ..
+            })
+        ));
+        assert_eq!(&*client.calls.lock(), &[ModelId::from("weak")]);
 
         // Authentication failure is not retryable, so the second candidate is untouched.
         let (client, result) = run_candidates(FirstOutcome::Unauthorized).await;
@@ -2664,6 +2796,32 @@ mod tests {
             );
             assert_eq!(&*client.calls.lock(), &[ModelId::from("weak")]);
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn capability_rejection_gives_the_next_candidate_the_fallback_request() -> Result<()> {
+        let client = Arc::new(CandidateClient {
+            calls: Mutex::new(Vec::new()),
+            requests: Mutex::new(Vec::new()),
+            first: FirstOutcome::BadRequest(IMAGE_REJECT),
+        });
+        run(
+            Arc::new(RewritingAlgorithm {}),
+            ClientRouter::single(client.clone()),
+            request(),
+            to_category_map(&["weak", "strong"]),
+            None,
+        )
+        .await?;
+        assert_eq!(
+            &*client.calls.lock(),
+            &[ModelId::from("weak"), "strong".into()]
+        );
+        assert_eq!(
+            client.requests.lock()[1].llm_request.messages,
+            request().llm_request.messages
+        );
         Ok(())
     }
 

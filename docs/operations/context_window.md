@@ -24,6 +24,26 @@ call fails as an overflow and falls through before anything reaches the client.
 An error event arriving after content has streamed is not retried — delivered
 output cannot be taken back — and surfaces to the client as before.
 
+## Targets that cannot serve the request
+
+The same fallback applies when an upstream answers HTTP 400 and the message says
+the model cannot take this input at all, such as `does not support image input`
+or `is not a multimodal model`. The phrase list is short on purpose: any other 400
+fails on the spot as before. The runtime log line for the fallback gives the reason
+`capability`; the routing log does not record reasons. A rejecting target is not
+remembered, so it is tried again on the next request. If every target rejects, the
+caller gets the last target's error.
+
+This covers the candidate list for the answer call, as on `random` and
+`stage_router` routes. Calls made during routing still stop on the 400. That
+includes the efficient-tier call on `llm_classifier` routes with
+`mode = "escalation"` and on `vgr` routes, even when the capable tier could serve
+the request. Hosts using the C interface run their own answer loop. Rejections of
+unsupported tool schemas are not recognized.
+
+`vision` is a route key, so `vision = false` rejects images for the whole route.
+It cannot mark one target of a route as text-only.
+
 ## Configuration
 
 There is no eviction key. A route falls through whenever it has more than one

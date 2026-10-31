@@ -213,6 +213,38 @@ async fn upstream_chat(
         )
             .into_response();
     }
+    if model == "model/weak" && prompt == "capability-reject" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "This model does not support image inputs"
+                }
+            })),
+        )
+            .into_response();
+    }
+    if prompt == "all-capability-reject" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "message": "judge is not a multimodal model",
+                    "type": "BadRequestError",
+                    "code": 400
+                }
+            })),
+        )
+            .into_response();
+    }
+    if model == "model/weak" && prompt == "invalid-image-data" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": "invalid image data"}})),
+        )
+            .into_response();
+    }
     if prompt == "upstream-headers" {
         // Both the buffered and the streamed reply echo the same set, so the two
         // capture paths are compared against one expectation.
@@ -4955,6 +4987,177 @@ async fn unavailable_target_fails_over_across_endpoints_and_stops_when_exhausted
             .collect::<Vec<_>>(),
         ["model/weak", "model/strong"]
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn capability_rejection_tries_the_next_candidate() -> TestResult {
+    let upstream = MockUpstream::start().await?;
+    // The fixed seed selects `model/weak` first while keeping `model/strong` enabled.
+    let app = build_switchyard_router(weighted_random_state(&upstream.base_url, [1000, 1])?);
+    let cases = [
+        (
+            "/v1/chat/completions",
+            json!({
+                "model": ROUTE_MODEL,
+                "messages": [{"role": "user", "content": "capability-reject"}]
+            }),
+        ),
+        (
+            "/v1/messages",
+            json!({
+                "model": ROUTE_MODEL,
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "capability-reject"}]
+            }),
+        ),
+        (
+            "/v1/responses",
+            json!({"model": ROUTE_MODEL, "input": "capability-reject"}),
+        ),
+    ];
+
+    for (path, body) in cases {
+        let previous_call_count = upstream.calls.lock().await.len();
+        let response = send(&app, "POST", path, Some(body)).await?;
+        assert_eq!(response.status, StatusCode::OK, "{path}");
+        assert_eq!(
+            response
+                .headers
+                .get("x-model-router-selected-model")
+                .and_then(|value| value.to_str().ok()),
+            Some("model/strong"),
+            "{path}"
+        );
+        assert_eq!(response.json()?["model"], "model/strong", "{path}");
+        assert_eq!(
+            upstream.models().await[previous_call_count..],
+            ["model/weak", "model/strong"],
+            "{path}"
+        );
+    }
+
+    let stats = send(&app, "GET", "/v1/stats", None).await?.json()?;
+    assert_eq!(
+        stats["routing_fallbacks"],
+        json!({"context_window": 0, "unavailable": 0})
+    );
+
+    // The rejection is an HTTP status, so it arrives before any stream byte.
+    let previous_call_count = upstream.calls.lock().await.len();
+    let response = send(
+        &app,
+        "POST",
+        "/v1/chat/completions",
+        Some(json!({
+            "model": ROUTE_MODEL,
+            "messages": [{"role": "user", "content": "capability-reject"}],
+            "stream": true
+        })),
+    )
+    .await?;
+    assert_eq!(response.status, StatusCode::OK);
+    assert!(response.text()?.contains("data: [DONE]"));
+    assert_eq!(
+        upstream.models().await[previous_call_count..],
+        ["model/weak", "model/strong"]
+    );
+
+    // The caller gets the last target's error when every target rejects.
+    let previous_call_count = upstream.calls.lock().await.len();
+    let response = send(
+        &app,
+        "POST",
+        "/v1/chat/completions",
+        Some(json!({
+            "model": ROUTE_MODEL,
+            "messages": [{"role": "user", "content": "all-capability-reject"}]
+        })),
+    )
+    .await?;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    let error = response.json()?;
+    assert_eq!(error["error"]["type"], "upstream_error");
+    assert_eq!(error["error"]["code"], "upstream_error");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("is not a multimodal model"))
+    );
+    assert_eq!(
+        upstream.models().await[previous_call_count..],
+        ["model/weak", "model/strong"]
+    );
+
+    // Any other 400 stops on the first target.
+    let previous_call_count = upstream.calls.lock().await.len();
+    let response = send(
+        &app,
+        "POST",
+        "/v1/chat/completions",
+        Some(json!({
+            "model": ROUTE_MODEL,
+            "messages": [{"role": "user", "content": "invalid-image-data"}]
+        })),
+    )
+    .await?;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        upstream.models().await[previous_call_count..],
+        ["model/weak"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn capability_rejection_on_a_routing_phase_call_keeps_the_400() -> TestResult {
+    let upstream = MockUpstream::start().await?;
+    let state = load_test_config(&format!(
+        r#"
+schema_version = 1
+
+[llm_clients.upstream]
+format = "openai_chat"
+base_url = "{base_url}"
+
+[targets.classifier]
+id = "model/strong"
+llm_client = "upstream"
+
+[targets.strong]
+id = "model/strong"
+llm_client = "upstream"
+
+[targets.weak]
+id = "model/weak"
+llm_client = "upstream"
+
+[routes.escalation]
+id = "switchyard/escalation"
+type = "llm_classifier"
+mode = "escalation"
+classifier_target = "classifier"
+strong_target = "strong"
+weak_target = "weak"
+escalation = {{ confirmations = 1 }}
+"#,
+        base_url = upstream.base_url
+    ))?;
+    let app = build_switchyard_router(state);
+
+    let response = send_with_headers(
+        &app,
+        "POST",
+        "/v1/chat/completions",
+        Some(json!({
+            "model": "switchyard/escalation",
+            "messages": [{"role": "user", "content": "capability-reject"}]
+        })),
+        &[("x-switchyard-session-id", "capability-reject")],
+    )
+    .await?;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert_eq!(upstream.models().await, ["model/weak"]);
     Ok(())
 }
 

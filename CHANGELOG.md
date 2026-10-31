@@ -33,6 +33,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before awaiting it. See the
   [host integration guide](docs/getting_started.md#drive-the-algorithm).
   ([#948](https://github.com/NVIDIA-NeMo/Switchyard/pull/948))
+- **Fallback on capability rejections** - an upstream 400 saying the model cannot
+  take this input, such as image input on a text-only model, now moves the answer
+  call to the route's next candidate. Calls made during routing still stop on it.
+  **Rust source-breaking change:** callers that match exhaustively on
+  `RoutingFallbackReason` must handle the new `Capability` variant.
 
 ### Changed
 
